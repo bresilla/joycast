@@ -44,13 +44,38 @@ pub struct DeviceInfo {
 pub struct DeviceScanner;
 
 impl DeviceScanner {
-    /// Enumerate all `/dev/input/event*` devices.
-    pub fn list_devices() -> Vec<DeviceInfo> {
+    /// Check if a device name represents non-controller system noise.
+    pub fn is_noise_device(name: &str) -> bool {
+        let n = name.to_lowercase();
+        n.starts_with("joycast:")
+            || n.contains("motion sensors")
+            || n.contains("system control")
+            || n.contains("consumer control")
+            || n.contains("hdmi")
+            || n.contains("pcm=")
+            || n.contains("headphone")
+            || n.contains("video bus")
+            || n.contains("lid switch")
+            || n.contains("power button")
+            || n.contains("sleep button")
+            || n.contains("pc speaker")
+            || n.contains("hotkeys")
+            || n.contains("button array")
+            || n.contains("privacy driver")
+            || n.contains("wireless controller touchpad")
+    }
+
+    /// Enumerate `/dev/input/event*` devices with noise filtering.
+    pub fn list_devices_filtered(include_all: bool) -> Vec<DeviceInfo> {
         let mut devices = Vec::new();
         for (path, device) in evdev::enumerate() {
             let name = device.name().unwrap_or("Unknown Device").to_string();
             let input_id = device.input_id();
             let device_type = Self::classify_device(&device);
+
+            if !include_all && (device_type == DeviceType::Other || Self::is_noise_device(&name)) {
+                continue;
+            }
 
             devices.push(DeviceInfo {
                 path,
@@ -62,6 +87,11 @@ impl DeviceScanner {
         }
         devices.sort_by(|a, b| a.path.cmp(&b.path));
         devices
+    }
+
+    /// Enumerate clean interactive input devices (Gamepads, Joysticks, Keyboards, Mice).
+    pub fn list_devices() -> Vec<DeviceInfo> {
+        Self::list_devices_filtered(false)
     }
 
     /// Classify device based on its supported keys and axes.

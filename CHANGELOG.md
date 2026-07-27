@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.0] - 2026-07-27
+
+### <!-- 0 -->⛰️  Features
+
+- Filter system noise devices in joycast list and add --all flag
+
 ## [0.2.4] - 2026-07-27
 
 ### <!-- 1 -->🐛 Bug Fixes
