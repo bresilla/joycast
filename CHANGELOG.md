@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.1] - 2026-07-27
+
+### <!-- 0 -->⛰️  Features
+
+- Allow connecting by known server hostname (joycast client <hostname>)
+
 ## [0.5.0] - 2026-07-27
 
 ### <!-- 0 -->⛰️  Features

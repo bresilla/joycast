@@ -105,4 +105,40 @@ impl HistoryStore {
             Some(self.data.servers[index - 1].clone())
         }
     }
+
+    /// Find a known server by hostname (case-insensitive search).
+    pub fn find_by_hostname(&self, hostname: &str) -> Option<KnownServerInfo> {
+        let needle = hostname.trim().to_lowercase();
+        self.data
+            .servers
+            .iter()
+            .find(|s| s.server_hostname.to_lowercase() == needle)
+            .cloned()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_history_hostname_lookup() {
+        let mut store = HistoryStore {
+            store_path: PathBuf::from("/tmp/test_known.json"),
+            data: HistoryData::default(),
+        };
+        store.data.servers.push(KnownServerInfo {
+            server_hostname: "tron".into(),
+            target: "701442f368940bfce1e03fa8a5ae1ec48557dc698f17f0d58efba8f4462a0690".into(),
+            transport_type: "Iroh P2P".into(),
+            last_connected: "2026-07-28T00:00:00Z".into(),
+        });
+
+        let found = store.find_by_hostname("TRON").unwrap();
+        assert_eq!(found.server_hostname, "tron");
+        assert_eq!(
+            found.target,
+            "701442f368940bfce1e03fa8a5ae1ec48557dc698f17f0d58efba8f4462a0690"
+        );
+    }
 }
