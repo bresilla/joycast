@@ -205,6 +205,8 @@ impl JoycastClient {
             "Opened input device"
         );
 
+        let dev_id_str = self.device_path.to_string_lossy().into_owned();
+
         match self.target {
             TargetAddress::Ip(addr) => {
                 Self::run_udp_client(
@@ -212,6 +214,7 @@ impl JoycastClient {
                     metadata,
                     addr,
                     self.client_id,
+                    dev_id_str,
                     self.target_raw,
                     self.history_file,
                 )
@@ -223,6 +226,7 @@ impl JoycastClient {
                     metadata,
                     node_id,
                     self.client_id,
+                    dev_id_str,
                     self.target_raw,
                     self.history_file,
                 )
@@ -237,6 +241,7 @@ impl JoycastClient {
         metadata: crate::protocol::DeviceMetadata,
         server_addr: std::net::SocketAddr,
         client_id: String,
+        device_id: String,
         target_raw: String,
         history_file: Option<PathBuf>,
     ) -> Result<()> {
@@ -256,6 +261,7 @@ impl JoycastClient {
             client_id: client_id.clone(),
             client_hostname: Self::client_hostname(),
             metadata,
+            device_id: Some(device_id),
         };
 
         let handshake = Message::Handshake(payload);
@@ -355,6 +361,7 @@ impl JoycastClient {
         metadata: crate::protocol::DeviceMetadata,
         node_id: iroh::PublicKey,
         client_id: String,
+        device_id: String,
         target_raw: String,
         history_file: Option<PathBuf>,
     ) -> Result<()> {
@@ -382,6 +389,7 @@ impl JoycastClient {
                 client_id: client_id.clone(),
                 client_hostname: Self::client_hostname(),
                 metadata,
+                device_id: Some(device_id),
             };
 
             let handshake = Message::Handshake(payload);

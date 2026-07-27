@@ -49,6 +49,8 @@ pub struct HandshakePayload {
     pub client_id: String,
     pub client_hostname: String,
     pub metadata: DeviceMetadata,
+    #[serde(default)]
+    pub device_id: Option<String>,
 }
 
 /// Messages sent between Joycast client and server.
@@ -109,6 +111,7 @@ mod tests {
             client_id: "client_123".into(),
             client_hostname: "my-laptop".into(),
             metadata: meta,
+            device_id: Some("/dev/input/event0".into()),
         };
 
         let msg = Message::Handshake(payload);

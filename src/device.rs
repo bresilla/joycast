@@ -218,10 +218,8 @@ pub struct VirtualOutput {
 }
 
 impl VirtualOutput {
-    /// Create a new virtual uinput device from client metadata.
-    pub fn new(meta: &DeviceMetadata) -> Result<Self> {
-        let dev_name = format!("Joycast: {}", meta.name);
-
+    /// Create a new virtual uinput device with custom device name.
+    pub fn new_with_name(meta: &DeviceMetadata, dev_name: &str) -> Result<Self> {
         let mut builder = match VirtualDevice::builder() {
             Ok(b) => b,
             Err(e) => bail!(
@@ -230,7 +228,7 @@ impl VirtualOutput {
             ),
         };
 
-        builder = builder.name(&dev_name).input_id(InputId::new(
+        builder = builder.name(dev_name).input_id(InputId::new(
             BusType(meta.bustype),
             meta.vendor,
             meta.product,
@@ -281,9 +279,15 @@ impl VirtualOutput {
         );
 
         Ok(Self {
-            name: dev_name,
+            name: dev_name.to_string(),
             device,
         })
+    }
+
+    /// Default constructor for virtual device.
+    pub fn new(meta: &DeviceMetadata) -> Result<Self> {
+        let dev_name = format!("{}: (Joycast)", meta.name);
+        Self::new_with_name(meta, &dev_name)
     }
 
     /// Emit a batch of wire events onto the uinput device.
