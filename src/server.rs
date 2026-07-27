@@ -12,8 +12,9 @@ use tokio::sync::Mutex;
 use tracing::{error, info, warn};
 
 use crate::device::VirtualOutput;
-use crate::protocol::{ALPN, Message};
+use crate::protocol::{ALPN, AckStatus, Message};
 use crate::transport::DEFAULT_PORT;
+use crate::trust::TrustManager;
 
 pub struct ServerConfig {
     pub bind_addr: Option<SocketAddr>,
@@ -21,6 +22,7 @@ pub struct ServerConfig {
     pub key_file: Option<PathBuf>,
     pub disable_udp: bool,
     pub disable_iroh: bool,
+    pub trust_manager: Option<TrustManager>,
 }
 
 impl Default for ServerConfig {
@@ -31,6 +33,7 @@ impl Default for ServerConfig {
             key_file: None,
             disable_udp: false,
             disable_iroh: false,
+            trust_manager: None,
         }
     }
 }
@@ -38,6 +41,7 @@ impl Default for ServerConfig {
 pub struct JoycastServer {
     udp_socket: Option<Arc<UdpSocket>>,
     iroh_endpoint: Option<Endpoint>,
+    trust_manager: TrustManager,
 }
 
 impl JoycastServer {
@@ -104,16 +108,13 @@ impl JoycastServer {
             && !sudo_user.is_empty()
             && sudo_user != "root"
         {
-            // Interactive sudo execution -> save to regular user's config
             PathBuf::from(format!("/home/{}/.config/joycast/server.key", sudo_user))
         } else if std::env::var("USER").unwrap_or_default() == "root"
             || std::env::var("JOURNAL_STREAM").is_ok()
             || std::env::var("SYSTEMD_EXEC_PID").is_ok()
         {
-            // System service or direct root daemon -> save to /etc/joycast/server.key
             PathBuf::from("/etc/joycast/server.key")
         } else if let Some(user_config) = dirs_next::config_dir() {
-            // Regular user -> save to ~/.config/joycast/server.key
             user_config.join("joycast").join("server.key")
         } else {
             PathBuf::from("/etc/joycast/server.key")
@@ -142,6 +143,11 @@ impl JoycastServer {
 
     /// Bind and initialize the Joycast server over Direct UDP and/or Iroh.
     pub async fn bind(config: ServerConfig) -> Result<Self> {
+        let trust_manager = match config.trust_manager.clone() {
+            Some(tm) => tm,
+            None => TrustManager::new(None)?,
+        };
+
         let udp_socket = if !config.disable_udp {
             let addr = config
                 .bind_addr
@@ -189,6 +195,7 @@ impl JoycastServer {
         Ok(Self {
             udp_socket,
             iroh_endpoint,
+            trust_manager,
         })
     }
 
@@ -199,14 +206,21 @@ impl JoycastServer {
             .map(|ep| ep.secret_key().public())
     }
 
+    /// Return reference to TrustManager.
+    pub fn trust_manager(&self) -> &TrustManager {
+        &self.trust_manager
+    }
+
     /// Run the server, listening concurrently on Direct UDP and Iroh P2P.
     pub async fn run(self) -> Result<()> {
         let mut handles = Vec::new();
+        let tm = self.trust_manager.clone();
 
         // 1. Direct UDP Listener
         if let Some(socket) = self.udp_socket {
+            let tm_clone = tm.clone();
             handles.push(tokio::spawn(async move {
-                if let Err(e) = Self::run_udp_server(socket).await {
+                if let Err(e) = Self::run_udp_server(socket, tm_clone).await {
                     error!("Direct UDP server loop error: {}", e);
                 }
             }));
@@ -214,8 +228,9 @@ impl JoycastServer {
 
         // 2. Iroh P2P Listener
         if let Some(endpoint) = self.iroh_endpoint {
+            let tm_clone = tm.clone();
             handles.push(tokio::spawn(async move {
-                if let Err(e) = Self::run_iroh_server(endpoint).await {
+                if let Err(e) = Self::run_iroh_server(endpoint, tm_clone).await {
                     error!("Iroh server loop error: {}", e);
                 }
             }));
@@ -228,9 +243,14 @@ impl JoycastServer {
         Ok(())
     }
 
+    /// Helper to get current host name.
+    fn server_hostname() -> String {
+        gethostname::gethostname().to_string_lossy().into_owned()
+    }
+
     /// Direct UDP packet handler loop.
-    async fn run_udp_server(socket: Arc<UdpSocket>) -> Result<()> {
-        let clients: Arc<Mutex<HashMap<SocketAddr, VirtualOutput>>> =
+    async fn run_udp_server(socket: Arc<UdpSocket>, tm: TrustManager) -> Result<()> {
+        let clients: Arc<Mutex<HashMap<SocketAddr, (String, VirtualOutput)>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let mut buf = vec![0u8; 65535];
 
@@ -256,36 +276,73 @@ impl JoycastServer {
             let socket_clone = Arc::clone(&socket);
 
             match msg {
-                Message::Handshake(meta) => {
-                    info!(client_addr = %src_addr, device = %meta.name, "Direct UDP Handshake received");
-                    match VirtualOutput::new(&meta) {
-                        Ok(vdev) => {
-                            clients_clone.lock().await.insert(src_addr, vdev);
-                            let ack = Message::HandshakeAck {
-                                success: true,
-                                message: "Virtual uinput device initialized (Direct UDP)".into(),
-                            };
-                            if let Ok(ack_bytes) = ack.encode() {
-                                let _ = socket_clone.send_to(&ack_bytes, src_addr).await;
+                Message::Handshake(payload) => {
+                    info!(
+                        client_addr = %src_addr,
+                        client_id = %payload.client_id,
+                        hostname = %payload.client_hostname,
+                        device = %payload.metadata.name,
+                        "Direct UDP Handshake received"
+                    );
+
+                    if tm.is_approved(&payload.client_id) {
+                        match VirtualOutput::new(&payload.metadata) {
+                            Ok(vdev) => {
+                                clients_clone
+                                    .lock()
+                                    .await
+                                    .insert(src_addr, (payload.client_id, vdev));
+                                let ack = Message::HandshakeAck {
+                                    status: AckStatus::Approved,
+                                    server_hostname: Self::server_hostname(),
+                                    message: "Connection authorized".into(),
+                                };
+                                if let Ok(ack_bytes) = ack.encode() {
+                                    let _ = socket_clone.send_to(&ack_bytes, src_addr).await;
+                                }
+                            }
+                            Err(e) => {
+                                let ack = Message::HandshakeAck {
+                                    status: AckStatus::Rejected,
+                                    server_hostname: Self::server_hostname(),
+                                    message: format!("Failed to create virtual device: {}", e),
+                                };
+                                if let Ok(ack_bytes) = ack.encode() {
+                                    let _ = socket_clone.send_to(&ack_bytes, src_addr).await;
+                                }
                             }
                         }
-                        Err(e) => {
-                            let ack = Message::HandshakeAck {
-                                success: false,
-                                message: format!("Failed to create virtual device: {}", e),
-                            };
-                            if let Ok(ack_bytes) = ack.encode() {
-                                let _ = socket_clone.send_to(&ack_bytes, src_addr).await;
-                            }
+                    } else {
+                        info!(client_id = %payload.client_id, "Client connection requires approval");
+                        tm.register_pending(
+                            payload.client_id.clone(),
+                            payload.client_hostname,
+                            payload.metadata.name,
+                            "Direct UDP".into(),
+                        );
+                        let ack = Message::HandshakeAck {
+                            status: AckStatus::PendingApproval,
+                            server_hostname: Self::server_hostname(),
+                            message: format!(
+                                "Connection pending authorization on server. Run 'joycast server approve {}' to authorize.",
+                                payload.client_id
+                            ),
+                        };
+                        if let Ok(ack_bytes) = ack.encode() {
+                            let _ = socket_clone.send_to(&ack_bytes, src_addr).await;
                         }
                     }
                 }
                 Message::Events(events) => {
                     let mut lock = clients_clone.lock().await;
-                    if let Some(vdev) = lock.get_mut(&src_addr)
-                        && let Err(e) = vdev.emit(&events)
-                    {
-                        warn!(client_addr = %src_addr, error = %e, "Failed to emit UDP events to virtual device");
+                    if let Some((client_id, vdev)) = lock.get_mut(&src_addr) {
+                        if !tm.is_approved(client_id) {
+                            warn!(client_addr = %src_addr, "Ignoring events from non-approved client");
+                            continue;
+                        }
+                        if let Err(e) = vdev.emit(&events) {
+                            warn!(client_addr = %src_addr, error = %e, "Failed to emit UDP events to virtual device");
+                        }
                     }
                 }
                 Message::Ping => {
@@ -299,8 +356,9 @@ impl JoycastServer {
     }
 
     /// Iroh P2P connection listener loop.
-    async fn run_iroh_server(endpoint: Endpoint) -> Result<()> {
+    async fn run_iroh_server(endpoint: Endpoint, tm: TrustManager) -> Result<()> {
         while let Some(incoming) = endpoint.accept().await {
+            let tm_clone = tm.clone();
             tokio::spawn(async move {
                 let accepting = match incoming.accept() {
                     Ok(a) => a,
@@ -321,7 +379,7 @@ impl JoycastServer {
                 let remote_node = conn.remote_id().to_string();
                 info!(client_id = %remote_node, "Iroh client connected");
 
-                if let Err(e) = Self::handle_iroh_client(conn).await {
+                if let Err(e) = Self::handle_iroh_client(conn, tm_clone).await {
                     warn!(client_id = %remote_node, error = %e, "Iroh client disconnected with error");
                 } else {
                     info!(client_id = %remote_node, "Iroh client disconnected gracefully");
@@ -332,7 +390,7 @@ impl JoycastServer {
     }
 
     /// Handle connection from a single Iroh client.
-    async fn handle_iroh_client(conn: iroh::endpoint::Connection) -> Result<()> {
+    async fn handle_iroh_client(conn: iroh::endpoint::Connection, tm: TrustManager) -> Result<()> {
         let (mut send, mut recv) = conn
             .accept_bi()
             .await
@@ -340,26 +398,54 @@ impl JoycastServer {
 
         // 1. Expect Handshake
         let handshake_msg = Self::read_frame(&mut recv).await?;
-        let meta = match handshake_msg {
-            Message::Handshake(meta) => meta,
+        let payload = match handshake_msg {
+            Message::Handshake(p) => p,
             other => bail!("Expected Handshake message, got: {:?}", other),
         };
 
-        info!(device = %meta.name, "Received device handshake from Iroh client");
+        info!(
+            client_id = %payload.client_id,
+            hostname = %payload.client_hostname,
+            device = %payload.metadata.name,
+            "Received device handshake from Iroh client"
+        );
 
-        // 2. Create Virtual Device
-        let mut virtual_device = match VirtualOutput::new(&meta) {
+        // 2. Security Approval Check
+        if !tm.is_approved(&payload.client_id) {
+            info!(client_id = %payload.client_id, "Iroh client requires server approval");
+            tm.register_pending(
+                payload.client_id.clone(),
+                payload.client_hostname,
+                payload.metadata.name,
+                "Iroh P2P".into(),
+            );
+            let ack = Message::HandshakeAck {
+                status: AckStatus::PendingApproval,
+                server_hostname: Self::server_hostname(),
+                message: format!(
+                    "Connection pending authorization on server. Run 'joycast server approve {}' to authorize.",
+                    payload.client_id
+                ),
+            };
+            Self::write_frame(&mut send, &ack).await?;
+            return Ok(());
+        }
+
+        // 3. Create Virtual Device for approved client
+        let mut virtual_device = match VirtualOutput::new(&payload.metadata) {
             Ok(dev) => {
                 let ack = Message::HandshakeAck {
-                    success: true,
-                    message: "Virtual uinput device initialized".to_string(),
+                    status: AckStatus::Approved,
+                    server_hostname: Self::server_hostname(),
+                    message: "Connection authorized".to_string(),
                 };
                 Self::write_frame(&mut send, &ack).await?;
                 dev
             }
             Err(e) => {
                 let ack = Message::HandshakeAck {
-                    success: false,
+                    status: AckStatus::Rejected,
+                    server_hostname: Self::server_hostname(),
                     message: format!("Failed to create virtual device: {}", e),
                 };
                 let _ = Self::write_frame(&mut send, &ack).await;
@@ -367,7 +453,7 @@ impl JoycastServer {
             }
         };
 
-        // 3. Main event loop
+        // 4. Main event loop
         loop {
             let msg = match Self::read_frame(&mut recv).await {
                 Ok(m) => m,

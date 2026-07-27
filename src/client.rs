@@ -3,6 +3,7 @@ use evdev::Device;
 use futures::StreamExt;
 use iroh::endpoint::presets::N0;
 use iroh::{Endpoint, SecretKey};
+use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
 use std::time::Duration;
@@ -10,24 +11,98 @@ use tokio::net::UdpSocket;
 use tracing::{error, info, warn};
 
 use crate::device::{DeviceScanner, extract_metadata};
-use crate::protocol::{ALPN, EventWire, Message};
+use crate::history::HistoryStore;
+use crate::protocol::{ALPN, AckStatus, EventWire, HandshakePayload, Message};
 use crate::server::JoycastServer;
 use crate::transport::TargetAddress;
 
 pub struct ClientConfig {
-    pub target: String,
+    pub target: Option<String>,
     pub device_path: Option<PathBuf>,
 }
 
 pub struct JoycastClient {
     target: TargetAddress,
+    target_raw: String,
     device_path: PathBuf,
+    client_id: String,
 }
 
 impl JoycastClient {
-    /// Initialize a Joycast client from target string (IP address or Iroh Node ID).
+    /// Load or generate a persistent client identity ID.
+    fn load_or_create_client_id() -> String {
+        let base_dir = dirs_next::config_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("joycast");
+        fs::create_dir_all(&base_dir).ok();
+        let id_file = base_dir.join("client_id");
+
+        if id_file.exists()
+            && let Ok(id) = fs::read_to_string(&id_file)
+            && !id.trim().is_empty()
+        {
+            return id.trim().to_string();
+        }
+
+        let new_id = hex::encode(SecretKey::generate().to_bytes());
+        let _ = fs::write(&id_file, &new_id);
+        new_id
+    }
+
+    /// Select target server interactively from history if not specified.
+    pub fn resolve_target(specified: Option<String>) -> Result<(TargetAddress, String)> {
+        if let Some(target_str) = specified {
+            let target = TargetAddress::from_str(&target_str)?;
+            return Ok((target, target_str));
+        }
+
+        let history = HistoryStore::new()?;
+        let servers = history.list_servers();
+
+        if servers.is_empty() {
+            bail!(
+                "No target specified and no previously connected servers found. Specify a target with 'joycast client <TARGET>'"
+            );
+        }
+
+        println!("\nSelect a previously connected server:");
+        for (idx, s) in servers.iter().enumerate() {
+            println!(
+                "  [{}] Hostname: {}\n      Target: {}\n      Transport: {}\n      Last Connected: {}\n",
+                idx + 1,
+                s.server_hostname,
+                s.target,
+                s.transport_type,
+                s.last_connected
+            );
+        }
+
+        print!("Enter selection [1-{}]: ", servers.len());
+        use std::io::Write;
+        std::io::stdout().flush().ok();
+
+        let mut input = String::new();
+        std::io::stdin()
+            .read_line(&mut input)
+            .context("Failed to read input selection")?;
+
+        let choice: usize = input.trim().parse().context("Invalid selection index")?;
+        let selected = history
+            .get_by_index(choice)
+            .context("Selection out of bounds")?;
+
+        info!(
+            "Selected server: {} ({})",
+            selected.server_hostname, selected.target
+        );
+        let target = TargetAddress::from_str(&selected.target)?;
+        Ok((target, selected.target))
+    }
+
+    /// Initialize a Joycast client.
     pub fn new(config: ClientConfig) -> Result<Self> {
-        let target = TargetAddress::from_str(&config.target)?;
+        let (target, target_raw) = Self::resolve_target(config.target)?;
+        let client_id = Self::load_or_create_client_id();
 
         let device_path = match config.device_path {
             Some(path) => path,
@@ -49,8 +124,15 @@ impl JoycastClient {
 
         Ok(Self {
             target,
+            target_raw,
             device_path,
+            client_id,
         })
+    }
+
+    /// Helper to get current host name.
+    fn client_hostname() -> String {
+        gethostname::gethostname().to_string_lossy().into_owned()
     }
 
     /// Run the client, streaming input events to the target server.
@@ -66,12 +148,18 @@ impl JoycastClient {
             abs_axes = metadata.abs_axes.len(),
             transport = %self.target.display_type(),
             target = %self.target,
+            client_id = %self.client_id,
             "Opened input device"
         );
 
         match self.target {
-            TargetAddress::Ip(addr) => Self::run_udp_client(device, metadata, addr).await,
-            TargetAddress::Iroh(node_id) => Self::run_iroh_client(device, metadata, node_id).await,
+            TargetAddress::Ip(addr) => {
+                Self::run_udp_client(device, metadata, addr, self.client_id, self.target_raw).await
+            }
+            TargetAddress::Iroh(node_id) => {
+                Self::run_iroh_client(device, metadata, node_id, self.client_id, self.target_raw)
+                    .await
+            }
         }
     }
 
@@ -80,6 +168,8 @@ impl JoycastClient {
         device: Device,
         metadata: crate::protocol::DeviceMetadata,
         server_addr: std::net::SocketAddr,
+        client_id: String,
+        target_raw: String,
     ) -> Result<()> {
         let socket = UdpSocket::bind("0.0.0.0:0")
             .await
@@ -93,7 +183,13 @@ impl JoycastClient {
             "Sending Handshake to Direct UDP server at {}...",
             server_addr
         );
-        let handshake = Message::Handshake(metadata);
+        let payload = HandshakePayload {
+            client_id: client_id.clone(),
+            client_hostname: Self::client_hostname(),
+            metadata,
+        };
+
+        let handshake = Message::Handshake(payload);
         let bytes = handshake.encode().context("Failed to encode handshake")?;
         socket
             .send(&bytes)
@@ -108,21 +204,41 @@ impl JoycastClient {
                 let ack_msg =
                     Message::decode(&buf[..len]).context("Failed to decode HandshakeAck")?;
                 match ack_msg {
-                    Message::HandshakeAck { success, message } => {
-                        if success {
-                            info!("Server acknowledged device creation: {}", message);
-                        } else {
-                            bail!("Server rejected device creation: {}", message);
+                    Message::HandshakeAck {
+                        status,
+                        server_hostname,
+                        message,
+                    } => match status {
+                        AckStatus::Approved => {
+                            info!("Server authorized connection: {}", message);
+                            if let Ok(mut history) = HistoryStore::new() {
+                                let _ = history.record_connection(
+                                    server_hostname,
+                                    target_raw,
+                                    "Direct UDP".into(),
+                                );
+                            }
                         }
-                    }
+                        AckStatus::PendingApproval => {
+                            warn!("------------------------------------------------------------");
+                            warn!("Server Authorization Required!");
+                            warn!("Your Client ID: {}", client_id);
+                            warn!("Message: {}", message);
+                            warn!("Please ask the server admin to run:");
+                            warn!("  joycast server approve {}", client_id);
+                            warn!("------------------------------------------------------------");
+                            bail!("Connection pending server authorization.");
+                        }
+                        AckStatus::Rejected => {
+                            bail!("Server rejected connection: {}", message);
+                        }
+                    },
                     other => bail!("Expected HandshakeAck from server, got: {:?}", other),
                 }
             }
             Ok(Err(e)) => bail!("Error receiving HandshakeAck: {}", e),
             Err(_) => {
-                warn!(
-                    "HandshakeAck timed out (server might not respond to ACK, continuing event forwarding...)"
-                );
+                warn!("HandshakeAck timed out (server might not respond to ACK)");
             }
         }
 
@@ -169,6 +285,8 @@ impl JoycastClient {
         device: Device,
         metadata: crate::protocol::DeviceMetadata,
         node_id: iroh::PublicKey,
+        client_id: String,
+        target_raw: String,
     ) -> Result<()> {
         let endpoint = Endpoint::builder(N0)
             .secret_key(SecretKey::generate())
@@ -189,20 +307,48 @@ impl JoycastClient {
             .context("Failed to open bi-directional stream")?;
 
         // 1. Send Handshake
-        let handshake = Message::Handshake(metadata);
+        let payload = HandshakePayload {
+            client_id: client_id.clone(),
+            client_hostname: Self::client_hostname(),
+            metadata,
+        };
+
+        let handshake = Message::Handshake(payload);
         JoycastServer::write_frame(&mut send, &handshake).await?;
         info!("Handshake sent to server, awaiting acknowledgment...");
 
         // 2. Receive HandshakeAck
         let ack_msg = JoycastServer::read_frame(&mut recv).await?;
         match ack_msg {
-            Message::HandshakeAck { success, message } => {
-                if success {
-                    info!("Server acknowledged device creation: {}", message);
-                } else {
-                    bail!("Server rejected device creation: {}", message);
+            Message::HandshakeAck {
+                status,
+                server_hostname,
+                message,
+            } => match status {
+                AckStatus::Approved => {
+                    info!("Server authorized connection: {}", message);
+                    if let Ok(mut history) = HistoryStore::new() {
+                        let _ = history.record_connection(
+                            server_hostname,
+                            target_raw,
+                            "Iroh P2P".into(),
+                        );
+                    }
                 }
-            }
+                AckStatus::PendingApproval => {
+                    warn!("------------------------------------------------------------");
+                    warn!("Server Authorization Required!");
+                    warn!("Your Client ID: {}", client_id);
+                    warn!("Message: {}", message);
+                    warn!("Please ask the server admin to run:");
+                    warn!("  joycast server approve {}", client_id);
+                    warn!("------------------------------------------------------------");
+                    bail!("Connection pending server authorization.");
+                }
+                AckStatus::Rejected => {
+                    bail!("Server rejected connection: {}", message);
+                }
+            },
             other => bail!("Expected HandshakeAck from server, got: {:?}", other),
         }
 

@@ -35,13 +35,33 @@ pub struct EventWire {
     pub value: i32,
 }
 
+/// Status of the handshake acknowledgment from server.
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+pub enum AckStatus {
+    Approved,
+    PendingApproval,
+    Rejected,
+}
+
+/// Payload sent by client during handshake.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct HandshakePayload {
+    pub client_id: String,
+    pub client_hostname: String,
+    pub metadata: DeviceMetadata,
+}
+
 /// Messages sent between Joycast client and server.
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub enum Message {
-    /// Sent by client upon connection to describe the input device.
-    Handshake(DeviceMetadata),
+    /// Sent by client upon connection to describe the client and input device.
+    Handshake(HandshakePayload),
     /// Sent by server in response to handshake.
-    HandshakeAck { success: bool, message: String },
+    HandshakeAck {
+        status: AckStatus,
+        server_hostname: String,
+        message: String,
+    },
     /// Batch of input events forwarded from client to server.
     Events(Vec<EventWire>),
     /// Keep-alive ping.
@@ -85,7 +105,13 @@ mod tests {
             rel_axes: vec![],
         };
 
-        let msg = Message::Handshake(meta);
+        let payload = HandshakePayload {
+            client_id: "client_123".into(),
+            client_hostname: "my-laptop".into(),
+            metadata: meta,
+        };
+
+        let msg = Message::Handshake(payload);
         let bytes = msg.encode().unwrap();
         let decoded = Message::decode(&bytes).unwrap();
         assert_eq!(msg, decoded);
