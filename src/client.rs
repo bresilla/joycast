@@ -16,9 +16,12 @@ use crate::protocol::{ALPN, AckStatus, EventWire, HandshakePayload, Message};
 use crate::server::JoycastServer;
 use crate::transport::TargetAddress;
 
+#[derive(Debug, Clone, Default)]
 pub struct ClientConfig {
     pub target: Option<String>,
     pub device_path: Option<PathBuf>,
+    pub history_file: Option<PathBuf>,
+    pub client_id_file: Option<PathBuf>,
 }
 
 pub struct JoycastClient {
@@ -26,16 +29,21 @@ pub struct JoycastClient {
     target_raw: String,
     device_path: PathBuf,
     client_id: String,
+    history_file: Option<PathBuf>,
 }
 
 impl JoycastClient {
     /// Load or generate a persistent client identity ID.
-    fn load_or_create_client_id() -> String {
-        let base_dir = dirs_next::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("joycast");
-        fs::create_dir_all(&base_dir).ok();
-        let id_file = base_dir.join("client_id");
+    fn load_or_create_client_id(custom_path: Option<PathBuf>) -> String {
+        let id_file = if let Some(p) = custom_path {
+            p
+        } else {
+            let base_dir = dirs_next::config_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("joycast");
+            fs::create_dir_all(&base_dir).ok();
+            base_dir.join("client_id")
+        };
 
         if id_file.exists()
             && let Ok(id) = fs::read_to_string(&id_file)
@@ -45,18 +53,24 @@ impl JoycastClient {
         }
 
         let new_id = hex::encode(SecretKey::generate().to_bytes());
+        if let Some(parent) = id_file.parent() {
+            fs::create_dir_all(parent).ok();
+        }
         let _ = fs::write(&id_file, &new_id);
         new_id
     }
 
     /// Select target server interactively from history if not specified.
-    pub fn resolve_target(specified: Option<String>) -> Result<(TargetAddress, String)> {
+    pub fn resolve_target(
+        specified: Option<String>,
+        history_file: Option<PathBuf>,
+    ) -> Result<(TargetAddress, String)> {
         if let Some(target_str) = specified {
             let target = TargetAddress::from_str(&target_str)?;
             return Ok((target, target_str));
         }
 
-        let history = HistoryStore::new()?;
+        let history = HistoryStore::with_path(history_file)?;
         let servers = history.list_servers();
 
         if servers.is_empty() {
@@ -101,8 +115,9 @@ impl JoycastClient {
 
     /// Initialize a Joycast client.
     pub fn new(config: ClientConfig) -> Result<Self> {
-        let (target, target_raw) = Self::resolve_target(config.target)?;
-        let client_id = Self::load_or_create_client_id();
+        let (target, target_raw) =
+            Self::resolve_target(config.target, config.history_file.clone())?;
+        let client_id = Self::load_or_create_client_id(config.client_id_file);
 
         let device_path = match config.device_path {
             Some(path) => path,
@@ -127,6 +142,7 @@ impl JoycastClient {
             target_raw,
             device_path,
             client_id,
+            history_file: config.history_file,
         })
     }
 
@@ -154,11 +170,26 @@ impl JoycastClient {
 
         match self.target {
             TargetAddress::Ip(addr) => {
-                Self::run_udp_client(device, metadata, addr, self.client_id, self.target_raw).await
+                Self::run_udp_client(
+                    device,
+                    metadata,
+                    addr,
+                    self.client_id,
+                    self.target_raw,
+                    self.history_file,
+                )
+                .await
             }
             TargetAddress::Iroh(node_id) => {
-                Self::run_iroh_client(device, metadata, node_id, self.client_id, self.target_raw)
-                    .await
+                Self::run_iroh_client(
+                    device,
+                    metadata,
+                    node_id,
+                    self.client_id,
+                    self.target_raw,
+                    self.history_file,
+                )
+                .await
             }
         }
     }
@@ -170,6 +201,7 @@ impl JoycastClient {
         server_addr: std::net::SocketAddr,
         client_id: String,
         target_raw: String,
+        history_file: Option<PathBuf>,
     ) -> Result<()> {
         let socket = UdpSocket::bind("0.0.0.0:0")
             .await
@@ -211,7 +243,7 @@ impl JoycastClient {
                     } => match status {
                         AckStatus::Approved => {
                             info!("Server authorized connection: {}", message);
-                            if let Ok(mut history) = HistoryStore::new() {
+                            if let Ok(mut history) = HistoryStore::with_path(history_file) {
                                 let _ = history.record_connection(
                                     server_hostname,
                                     target_raw,
@@ -287,6 +319,7 @@ impl JoycastClient {
         node_id: iroh::PublicKey,
         client_id: String,
         target_raw: String,
+        history_file: Option<PathBuf>,
     ) -> Result<()> {
         let endpoint = Endpoint::builder(N0)
             .secret_key(SecretKey::generate())
@@ -327,7 +360,7 @@ impl JoycastClient {
             } => match status {
                 AckStatus::Approved => {
                     info!("Server authorized connection: {}", message);
-                    if let Ok(mut history) = HistoryStore::new() {
+                    if let Ok(mut history) = HistoryStore::with_path(history_file) {
                         let _ = history.record_connection(
                             server_hostname,
                             target_raw,
