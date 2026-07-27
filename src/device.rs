@@ -47,8 +47,7 @@ impl DeviceScanner {
     /// Check if a device name represents non-controller system noise.
     pub fn is_noise_device(name: &str) -> bool {
         let n = name.to_lowercase();
-        n.starts_with("joycast:")
-            || n.contains("motion sensors")
+        n.contains("motion sensors")
             || n.contains("system control")
             || n.contains("consumer control")
             || n.contains("hdmi")

@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.2] - 2026-07-27
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Allow Joycast virtual gamepad devices to be displayed in joycast list
+
 ## [0.4.1] - 2026-07-27
 
 ### <!-- 1 -->🐛 Bug Fixes
