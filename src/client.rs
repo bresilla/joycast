@@ -63,14 +63,33 @@ impl JoycastClient {
         new_id
     }
 
-    /// Select target server interactively from history if not specified.
+    /// Select target server interactively from history if not specified, or resolve hostname from history.
     pub fn resolve_target(
         specified: Option<String>,
         history_file: Option<PathBuf>,
     ) -> Result<(TargetAddress, String)> {
         if let Some(target_str) = specified {
-            let target = TargetAddress::from_str(&target_str)?;
-            return Ok((target, target_str));
+            if let Ok(target) = TargetAddress::from_str(&target_str) {
+                return Ok((target, target_str));
+            }
+
+            // Target is not a direct IP or valid Iroh Node ID.
+            // Search known server history for a matching server hostname!
+            if let Ok(history) = HistoryStore::with_path(history_file.clone())
+                && let Some(matched) = history.find_by_hostname(&target_str)
+            {
+                info!(
+                    "Resolved server hostname '{}' -> target '{}' ({})",
+                    matched.server_hostname, matched.target, matched.transport_type
+                );
+                let target = TargetAddress::from_str(&matched.target)?;
+                return Ok((target, matched.target.clone()));
+            }
+
+            bail!(
+                "Could not resolve target '{}'. Must be an IP address (e.g. 192.168.1.50:12398), a 64-character Iroh Node ID, or a known server hostname in history.",
+                target_str
+            );
         }
 
         let history = HistoryStore::with_path(history_file)?;
