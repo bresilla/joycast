@@ -60,6 +60,18 @@ enum Commands {
         #[arg(short, long)]
         device: Option<PathBuf>,
 
+        /// Include keyboard devices during device auto-detection
+        #[arg(short, long)]
+        keyboard: bool,
+
+        /// Include mouse devices during device auto-detection
+        #[arg(short, long)]
+        mouse: bool,
+
+        /// Include all system input devices during device auto-detection
+        #[arg(short, long)]
+        all: bool,
+
         /// Show list of previously connected servers
         #[arg(long)]
         history: bool,
@@ -191,6 +203,9 @@ async fn main() -> Result<()> {
         Commands::Client {
             target,
             device,
+            keyboard,
+            mouse,
+            all,
             history,
         } => {
             if history {
@@ -217,6 +232,9 @@ async fn main() -> Result<()> {
             let client = JoycastClient::new(ClientConfig {
                 target,
                 device_path: device,
+                keyboard,
+                mouse,
+                all,
                 ..Default::default()
             })?;
             client.run().await?;
