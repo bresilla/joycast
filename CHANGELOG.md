@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.6] - 2026-07-27
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Release both glibc (arm64) and musl (amd64, arm64-musl) binaries
+
 ## [0.4.5] - 2026-07-27
 
 ### <!-- 7 -->⚙️ Miscellaneous Tasks
