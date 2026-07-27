@@ -17,11 +17,13 @@ Inspired by [warpout](https://github.com/bresilla/warpout), `joycast` captures p
 - **Client's Local Connection History**:
   - The client locally remembers servers it has successfully connected to (storing server hostname, target address, and transport).
   - Running `joycast client` without arguments displays an interactive menu of previously saved servers on the client.
+- **Embedded Systemd Service Management**:
+  - Built-in `joycast service` subcommand (`install`, `start`, `stop`, `restart`, `status`, `logs`, `uninstall`) with embedded systemd unit templates.
 - **Dynamic Device Mirroring**:
   - Reads client input capabilities (buttons, axes, fuzz, flat, resolution, vendor/product IDs).
   - Synthesizes an identical virtual `uinput` device on the server.
 - **Modular Library & Single Binary**:
-  - Full Rust library (`joycast`) exposing server, client, trust manager, device scanner, and history modules with configurable paths.
+  - Full Rust library (`joycast`) exposing server, client, trust manager, device scanner, service manager, and history modules with configurable paths.
   - Single CLI binary (`joycast`).
 
 ---
@@ -33,6 +35,34 @@ cargo build --release
 ```
 
 The resulting binary will be placed at `./target/release/joycast`.
+
+---
+
+## Systemd Service Management
+
+`joycast` includes built-in systemd service management directly inside the binary.
+
+### 1. Install Systemd Service
+
+```bash
+sudo joycast service install
+```
+
+*For user-level systemd service (`~/.config/systemd/user/joycast.service`), add the `--user` flag:*
+```bash
+joycast service install --user
+```
+
+### 2. Service Management Commands
+
+```bash
+joycast service start     # Start the daemon
+joycast service stop      # Stop the daemon
+joycast service restart   # Restart the daemon
+joycast service status    # Check service status
+joycast service logs      # Tail live journalctl logs
+joycast service uninstall # Disable and remove service file
+```
 
 ---
 
@@ -115,7 +145,15 @@ Joycast Server is up and listening!
 ### 2. List Local Input Devices
 
 ```bash
+# List gamepads & joysticks by default
 joycast list
+
+# Include keyboards or mice
+joycast list --keyboard
+joycast list --mouse
+
+# Show all raw system input devices
+joycast list --all
 ```
 
 ---
@@ -163,7 +201,7 @@ Add `joycast` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-joycast = "0.2"
+joycast = "0.3"
 tokio = { version = "1", features = ["full"] }
 ```
 
@@ -227,6 +265,9 @@ async fn main() -> Result<()> {
         target: Some("192.168.1.50:12398".to_string()),
         // Path to physical input device (None for auto-detecting first gamepad)
         device_path: Some(PathBuf::from("/dev/input/event3")),
+        keyboard: false,
+        mouse: false,
+        all: false,
         // Custom path to store client's local server history
         history_file: Some(custom_data_dir.join("known_servers.json")),
         // Custom path to store persistent client identity ID
