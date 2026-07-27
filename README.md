@@ -21,8 +21,8 @@ Inspired by [warpout](https://github.com/bresilla/warpout), `joycast` captures p
   - Reads client input capabilities (buttons, axes, fuzz, flat, resolution, vendor/product IDs).
   - Synthesizes an identical virtual `uinput` device on the server.
 - **Modular Library & Single Binary**:
-  - Library (`joycast`) exposing full server, client, trust manager, and history modules.
-  - CLI binary (`joycast`).
+  - Full Rust library (`joycast`) exposing server, client, trust manager, device scanner, and history modules with configurable paths.
+  - Single CLI binary (`joycast`).
 
 ---
 
@@ -163,44 +163,55 @@ Add `joycast` to your `Cargo.toml`:
 
 ```toml
 [dependencies]
-joycast = "0.1"
+joycast = "0.2"
 tokio = { version = "1", features = ["full"] }
 ```
 
-### Server-Side Library Example
+### 1. Server-Side Library Example
+
+Run a custom Joycast server with custom storage paths for the static server key and trusted clients file:
 
 ```rust
 use anyhow::Result;
 use joycast::server::{JoycastServer, ServerConfig};
 use joycast::trust::TrustManager;
+use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    // Initialize custom trust manager for client authorization
-    let trust_manager = TrustManager::new(None)?;
+    let custom_config_dir = PathBuf::from("/etc/myapp/joycast");
 
-    // Manually approve a trusted client ID programmatically if desired
-    // trust_manager.approve("client_123")?;
+    // Initialize trust manager with a custom storage path for trusted clients
+    let trust_manager = TrustManager::new(Some(custom_config_dir.join("trusted_clients.json")))?;
+
+    // Programmatically authorize a specific client ID if desired
+    // trust_manager.approve("8f3a9b1c")?;
 
     let config = ServerConfig {
         bind_addr: Some("0.0.0.0:12398".parse()?),
         secret_key: None,
-        key_file: None,
+        key_file: Some(custom_config_dir.join("server.key")),
         disable_udp: false,
         disable_iroh: false,
         trust_manager: Some(trust_manager),
     };
 
     let server = JoycastServer::bind(config).await?;
-    println!("Server bound to Iroh Node ID: {:?}", server.iroh_node_id());
+    if let Some(node_id) = server.iroh_node_id() {
+        println!("Server listening with static Iroh Node ID: {}", node_id);
+    }
 
-    // Run server event loop
+    // Run server loop
     server.run().await?;
     Ok(())
 }
 ```
 
-### Client-Side Library Example
+---
+
+### 2. Client-Side Library Example
+
+Connect a client to a server using custom configuration directories for server history and client identity:
 
 ```rust
 use anyhow::Result;
@@ -209,15 +220,58 @@ use std::path::PathBuf;
 
 #[tokio::main]
 async fn main() -> Result<()> {
+    let custom_data_dir = PathBuf::from("/var/lib/myapp");
+
     let config = ClientConfig {
-        // Pass Iroh Node ID or Direct IP address string
+        // Specify Iroh Node ID or Direct IP address string
         target: Some("192.168.1.50:12398".to_string()),
-        // Specify input device path or None for auto-detection
+        // Path to physical input device (None for auto-detecting first gamepad)
         device_path: Some(PathBuf::from("/dev/input/event3")),
+        // Custom path to store server history
+        history_file: Some(custom_data_dir.join("known_servers.json")),
+        // Custom path to store persistent client identity ID
+        client_id_file: Some(custom_data_dir.join("client_id")),
     };
 
     let client = JoycastClient::new(config)?;
     client.run().await?;
+    Ok(())
+}
+```
+
+---
+
+### 3. Programmatic Device Scanning & Security Management
+
+Query input devices, inspect pending client connection requests, and manage authorization programmatically:
+
+```rust
+use anyhow::Result;
+use joycast::device::DeviceScanner;
+use joycast::history::HistoryStore;
+use joycast::trust::TrustManager;
+
+fn main() -> Result<()> {
+    // List available Linux input devices (/dev/input/event*)
+    let devices = DeviceScanner::list_devices();
+    for dev in &devices {
+        println!("Found input device: {} at {}", dev.name, dev.path.display());
+    }
+
+    // Inspect pending connection requests on server
+    let trust = TrustManager::new(None)?;
+    for pending in trust.list_pending() {
+        println!("Pending client: {} ({})", pending.client_id, pending.hostname);
+        // Approve client programmatically:
+        // trust.approve(&pending.client_id)?;
+    }
+
+    // Inspect server history on client
+    let history = HistoryStore::new()?;
+    for server in history.list_servers() {
+        println!("Known server: {} ({})", server.server_hostname, server.target);
+    }
+
     Ok(())
 }
 ```
