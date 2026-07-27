@@ -66,6 +66,14 @@ enum Commands {
     },
     /// List available local input devices (/dev/input/event*)
     List {
+        /// Include keyboard input devices
+        #[arg(short, long)]
+        keyboard: bool,
+
+        /// Include mouse input devices
+        #[arg(short, long)]
+        mouse: bool,
+
         /// Show all raw system input devices (including lid switches, audio, power buttons)
         #[arg(short, long)]
         all: bool,
@@ -213,19 +221,28 @@ async fn main() -> Result<()> {
             })?;
             client.run().await?;
         }
-        Commands::List { all } => {
-            let devices = DeviceScanner::list_devices_filtered(all);
+        Commands::List {
+            keyboard,
+            mouse,
+            all,
+        } => {
+            let devices = DeviceScanner::list_devices_filtered(keyboard, mouse, all);
             if all {
                 println!("All Linux Input Devices (/dev/input/event*):\n");
             } else {
-                println!(
-                    "Available Interactive Input Devices (Gamepads, Joysticks, Keyboards, Mice):\n"
-                );
+                let mut categories = vec!["Gamepads / Joysticks"];
+                if keyboard {
+                    categories.push("Keyboards");
+                }
+                if mouse {
+                    categories.push("Mice");
+                }
+                println!("Available Input Devices ({}):\n", categories.join(", "));
             }
 
             if devices.is_empty() {
                 println!(
-                    "  No interactive input devices found. Run `joycast list --all` to view system devices."
+                    "  No matching input devices found. Run `joycast list --all` to view all system devices."
                 );
             } else {
                 for (idx, dev) in devices.iter().enumerate() {
