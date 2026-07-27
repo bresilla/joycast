@@ -205,6 +205,7 @@ async fn main() -> Result<()> {
             let client = JoycastClient::new(ClientConfig {
                 target,
                 device_path: device,
+                ..Default::default()
             })?;
             client.run().await?;
         }

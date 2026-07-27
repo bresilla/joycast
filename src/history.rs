@@ -25,13 +25,22 @@ pub struct HistoryStore {
 }
 
 impl HistoryStore {
-    /// Load or create HistoryStore.
+    /// Load or create HistoryStore using default path (~/.config/joycast/known_servers.json).
     pub fn new() -> Result<Self> {
-        let base_dir = dirs_next::config_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join("joycast");
-        fs::create_dir_all(&base_dir).ok();
-        let store_path = base_dir.join("known_servers.json");
+        Self::with_path(None)
+    }
+
+    /// Load or create HistoryStore using a custom path or default directory.
+    pub fn with_path(custom_path: Option<PathBuf>) -> Result<Self> {
+        let store_path = if let Some(p) = custom_path {
+            p
+        } else {
+            let base_dir = dirs_next::config_dir()
+                .unwrap_or_else(|| PathBuf::from("."))
+                .join("joycast");
+            fs::create_dir_all(&base_dir).ok();
+            base_dir.join("known_servers.json")
+        };
 
         let data = if store_path.exists() {
             match fs::read_to_string(&store_path) {
