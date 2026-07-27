@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.7] - 2026-07-27
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Patch noq-udp cmsg alignment check for aarch64 musl compatibility
+
 ## [0.4.6] - 2026-07-27
 
 ### <!-- 7 -->⚙️ Miscellaneous Tasks
