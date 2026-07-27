@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, bail};
 use evdev::{
     AbsoluteAxisCode, AttributeSet, BusType, Device, InputEvent, InputId, KeyCode,
     RelativeAxisCode, uinput::VirtualDevice,
@@ -179,15 +179,21 @@ impl VirtualOutput {
     /// Create a new virtual uinput device from client metadata.
     pub fn new(meta: &DeviceMetadata) -> Result<Self> {
         let dev_name = format!("Joycast: {}", meta.name);
-        let mut builder = VirtualDevice::builder()
-            .context("Failed to initialize VirtualDevice builder")?
-            .name(&dev_name)
-            .input_id(InputId::new(
-                BusType(meta.bustype),
-                meta.vendor,
-                meta.product,
-                meta.version,
-            ));
+
+        let mut builder = match VirtualDevice::builder() {
+            Ok(b) => b,
+            Err(e) => bail!(
+                "Failed to open /dev/uinput ({}). Run 'sudo joycast server' or add your user to the 'input' group with uinput udev rules enabled.",
+                e
+            ),
+        };
+
+        builder = builder.name(&dev_name).input_id(InputId::new(
+            BusType(meta.bustype),
+            meta.vendor,
+            meta.product,
+            meta.version,
+        ));
 
         let mut key_set = AttributeSet::<KeyCode>::new();
         for &k in &meta.keys {
