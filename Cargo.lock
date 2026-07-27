@@ -1767,7 +1767,7 @@ dependencies = [
 
 [[package]]
 name = "joycast"
-version = "0.4.5"
+version = "0.4.6"
 dependencies = [
  "anyhow",
  "chrono",
@@ -2160,8 +2160,6 @@ dependencies = [
 [[package]]
 name = "noq-udp"
 version = "1.1.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bde7a5d5102f1cff03d482240f0ed20551661f63663620f4b26112ed751165e9"
 dependencies = [
  "cfg_aliases",
  "libc",

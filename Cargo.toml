@@ -35,3 +35,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[patch.crates-io]
+noq-udp = { path = "patches/noq-udp" }
+
