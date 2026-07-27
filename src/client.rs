@@ -339,85 +339,91 @@ impl JoycastClient {
             .await
             .context("Failed to open bi-directional stream")?;
 
-        // 1. Send Handshake
-        let payload = HandshakePayload {
-            client_id: client_id.clone(),
-            client_hostname: Self::client_hostname(),
-            metadata,
-        };
+        let run_res = async {
+            // 1. Send Handshake
+            let payload = HandshakePayload {
+                client_id: client_id.clone(),
+                client_hostname: Self::client_hostname(),
+                metadata,
+            };
 
-        let handshake = Message::Handshake(payload);
-        JoycastServer::write_frame(&mut send, &handshake).await?;
-        info!("Handshake sent to server, awaiting acknowledgment...");
+            let handshake = Message::Handshake(payload);
+            JoycastServer::write_frame(&mut send, &handshake).await?;
+            info!("Handshake sent to server, awaiting acknowledgment...");
 
-        // 2. Receive HandshakeAck
-        let ack_msg = JoycastServer::read_frame(&mut recv).await?;
-        match ack_msg {
-            Message::HandshakeAck {
-                status,
-                server_hostname,
-                message,
-            } => match status {
-                AckStatus::Approved => {
-                    info!("Server authorized connection: {}", message);
-                    if let Ok(mut history) = HistoryStore::with_path(history_file) {
-                        let _ = history.record_connection(
-                            server_hostname,
-                            target_raw,
-                            "Iroh P2P".into(),
-                        );
-                    }
-                }
-                AckStatus::PendingApproval => {
-                    warn!("------------------------------------------------------------");
-                    warn!("Server Authorization Required!");
-                    warn!("Your Client ID: {}", client_id);
-                    warn!("Message: {}", message);
-                    warn!("Please ask the server admin to run:");
-                    warn!("  joycast server approve {}", client_id);
-                    warn!("------------------------------------------------------------");
-                    bail!("Connection pending server authorization.");
-                }
-                AckStatus::Rejected => {
-                    bail!("Server rejected connection: {}", message);
-                }
-            },
-            other => bail!("Expected HandshakeAck from server, got: {:?}", other),
-        }
-
-        info!("Forwarding input events over Iroh P2P. Press Ctrl+C to stop.");
-
-        let mut event_stream = device
-            .into_event_stream()
-            .context("Failed to create async event stream for device")?;
-
-        let mut event_batch = Vec::new();
-
-        while let Some(ev_res) = event_stream.next().await {
-            match ev_res {
-                Ok(ev) => {
-                    event_batch.push(EventWire {
-                        type_: ev.event_type().0,
-                        code: ev.code(),
-                        value: ev.value(),
-                    });
-
-                    if !event_batch.is_empty() {
-                        let msg = Message::Events(std::mem::take(&mut event_batch));
-                        if let Err(e) = JoycastServer::write_frame(&mut send, &msg).await {
-                            warn!("Failed to send event batch to server: {}", e);
-                            break;
+            // 2. Receive HandshakeAck
+            let ack_msg = JoycastServer::read_frame(&mut recv).await?;
+            match ack_msg {
+                Message::HandshakeAck {
+                    status,
+                    server_hostname,
+                    message,
+                } => match status {
+                    AckStatus::Approved => {
+                        info!("Server authorized connection: {}", message);
+                        if let Ok(mut history) = HistoryStore::with_path(history_file) {
+                            let _ = history.record_connection(
+                                server_hostname,
+                                target_raw,
+                                "Iroh P2P".into(),
+                            );
                         }
                     }
-                }
-                Err(e) => {
-                    error!("Error reading evdev event: {}", e);
-                    break;
+                    AckStatus::PendingApproval => {
+                        warn!("------------------------------------------------------------");
+                        warn!("Server Authorization Required!");
+                        warn!("Your Client ID: {}", client_id);
+                        warn!("Message: {}", message);
+                        warn!("Please ask the server admin to run:");
+                        warn!("  joycast server approve {}", client_id);
+                        warn!("------------------------------------------------------------");
+                        bail!("Connection pending server authorization.");
+                    }
+                    AckStatus::Rejected => {
+                        bail!("Server rejected connection: {}", message);
+                    }
+                },
+                other => bail!("Expected HandshakeAck from server, got: {:?}", other),
+            }
+
+            info!("Forwarding input events over Iroh P2P. Press Ctrl+C to stop.");
+
+            let mut event_stream = device
+                .into_event_stream()
+                .context("Failed to create async event stream for device")?;
+
+            let mut event_batch = Vec::new();
+
+            while let Some(ev_res) = event_stream.next().await {
+                match ev_res {
+                    Ok(ev) => {
+                        event_batch.push(EventWire {
+                            type_: ev.event_type().0,
+                            code: ev.code(),
+                            value: ev.value(),
+                        });
+
+                        if !event_batch.is_empty() {
+                            let msg = Message::Events(std::mem::take(&mut event_batch));
+                            if let Err(e) = JoycastServer::write_frame(&mut send, &msg).await {
+                                warn!("Failed to send event batch to server: {}", e);
+                                break;
+                            }
+                        }
+                    }
+                    Err(e) => {
+                        error!("Error reading evdev event: {}", e);
+                        break;
+                    }
                 }
             }
-        }
 
-        info!("Joycast Iroh client shutting down...");
-        Ok(())
+            info!("Joycast Iroh client shutting down...");
+            Ok(())
+        }
+        .await;
+
+        endpoint.close().await;
+        run_res
     }
 }

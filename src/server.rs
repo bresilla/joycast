@@ -6,6 +6,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -380,7 +381,7 @@ impl JoycastServer {
                 info!(client_id = %remote_node, "Iroh client connected");
 
                 if let Err(e) = Self::handle_iroh_client(conn, tm_clone).await {
-                    warn!(client_id = %remote_node, error = %e, "Iroh client disconnected with error");
+                    warn!(client_id = %remote_node, error = %e, "Iroh client disconnected");
                 } else {
                     info!(client_id = %remote_node, "Iroh client disconnected gracefully");
                 }
@@ -428,6 +429,8 @@ impl JoycastServer {
                 ),
             };
             Self::write_frame(&mut send, &ack).await?;
+            let _ = send.finish();
+            tokio::time::sleep(Duration::from_millis(1000)).await;
             return Ok(());
         }
 
@@ -449,6 +452,8 @@ impl JoycastServer {
                     message: format!("Failed to create virtual device: {}", e),
                 };
                 let _ = Self::write_frame(&mut send, &ack).await;
+                let _ = send.finish();
+                tokio::time::sleep(Duration::from_millis(500)).await;
                 return Err(e);
             }
         };
