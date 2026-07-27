@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.3] - 2026-07-27
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Implement centralized session map to immediately tear down old virtual device upon client reconnect
+
 ## [0.4.2] - 2026-07-27
 
 ### <!-- 1 -->🐛 Bug Fixes

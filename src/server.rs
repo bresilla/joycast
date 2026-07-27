@@ -43,6 +43,7 @@ pub struct JoycastServer {
     udp_socket: Option<Arc<UdpSocket>>,
     iroh_endpoint: Option<Endpoint>,
     trust_manager: TrustManager,
+    active_sessions: Arc<Mutex<HashMap<String, VirtualOutput>>>,
 }
 
 impl JoycastServer {
@@ -62,19 +63,16 @@ impl JoycastServer {
 
     /// Helper to load or generate a persistent SecretKey so the Node ID remains static across restarts.
     fn load_or_create_secret_key(config: &ServerConfig) -> Result<SecretKey> {
-        // 1. Explicit secret key string passed
         if let Some(ref key_str) = config.secret_key {
             return Self::parse_secret_key_hex(key_str);
         }
 
-        // 2. Explicit key file path passed
         if let Some(ref path) = config.key_file {
             let content = fs::read_to_string(path)
                 .with_context(|| format!("Failed to read key file at {}", path.display()))?;
             return Self::parse_secret_key_hex(&content);
         }
 
-        // 3. Candidate search order
         let mut candidates = Vec::new();
         let etc_path = PathBuf::from("/etc/joycast/server.key");
         candidates.push(etc_path.clone());
@@ -93,7 +91,6 @@ impl JoycastServer {
             candidates.push(user_config.join("joycast").join("server.key"));
         }
 
-        // Search for existing key in candidate paths
         for path in &candidates {
             if path.exists()
                 && let Ok(content) = fs::read_to_string(path)
@@ -104,7 +101,6 @@ impl JoycastServer {
             }
         }
 
-        // Target write path when generating a new key
         let target_path = if etc_path.exists() || TrustManager::is_root_context() {
             etc_path
         } else if let Some(user_config) = dirs_next::config_dir() {
@@ -189,6 +185,7 @@ impl JoycastServer {
             udp_socket,
             iroh_endpoint,
             trust_manager,
+            active_sessions: Arc::new(Mutex::new(HashMap::new())),
         })
     }
 
@@ -208,6 +205,7 @@ impl JoycastServer {
     pub async fn run(self) -> Result<()> {
         let mut handles = Vec::new();
         let tm = self.trust_manager.clone();
+        let active_sessions = Arc::clone(&self.active_sessions);
 
         // 1. Direct UDP Listener
         if let Some(socket) = self.udp_socket {
@@ -222,8 +220,9 @@ impl JoycastServer {
         // 2. Iroh P2P Listener
         if let Some(endpoint) = self.iroh_endpoint {
             let tm_clone = tm.clone();
+            let sessions_clone = Arc::clone(&active_sessions);
             handles.push(tokio::spawn(async move {
-                if let Err(e) = Self::run_iroh_server(endpoint, tm_clone).await {
+                if let Err(e) = Self::run_iroh_server(endpoint, tm_clone, sessions_clone).await {
                     error!("Iroh server loop error: {}", e);
                 }
             }));
@@ -253,7 +252,6 @@ impl JoycastServer {
             Arc::new(Mutex::new(HashMap::new()));
         let mut buf = vec![0u8; 65535];
 
-        // Periodically clean up inactive UDP sessions
         let clients_reaper = Arc::clone(&clients);
         tokio::spawn(async move {
             loop {
@@ -377,9 +375,14 @@ impl JoycastServer {
     }
 
     /// Iroh P2P connection listener loop.
-    async fn run_iroh_server(endpoint: Endpoint, tm: TrustManager) -> Result<()> {
+    async fn run_iroh_server(
+        endpoint: Endpoint,
+        tm: TrustManager,
+        active_sessions: Arc<Mutex<HashMap<String, VirtualOutput>>>,
+    ) -> Result<()> {
         while let Some(incoming) = endpoint.accept().await {
             let tm_clone = tm.clone();
+            let sessions_clone = Arc::clone(&active_sessions);
             tokio::spawn(async move {
                 let accepting = match incoming.accept() {
                     Ok(a) => a,
@@ -400,7 +403,7 @@ impl JoycastServer {
                 let remote_node = conn.remote_id().to_string();
                 info!(client_id = %remote_node, "Iroh client connected");
 
-                if let Err(e) = Self::handle_iroh_client(conn, tm_clone).await {
+                if let Err(e) = Self::handle_iroh_client(conn, tm_clone, sessions_clone).await {
                     warn!(client_id = %remote_node, error = %e, "Iroh client disconnected");
                 } else {
                     info!(client_id = %remote_node, "Iroh client disconnected gracefully");
@@ -411,7 +414,11 @@ impl JoycastServer {
     }
 
     /// Handle connection from a single Iroh client.
-    async fn handle_iroh_client(conn: iroh::endpoint::Connection, tm: TrustManager) -> Result<()> {
+    async fn handle_iroh_client(
+        conn: iroh::endpoint::Connection,
+        tm: TrustManager,
+        active_sessions: Arc<Mutex<HashMap<String, VirtualOutput>>>,
+    ) -> Result<()> {
         let (mut send, mut recv) = conn
             .accept_bi()
             .await
@@ -454,8 +461,17 @@ impl JoycastServer {
             return Ok(());
         }
 
-        // 3. Create Virtual Device for approved client
-        let mut virtual_device = match VirtualOutput::new(&payload.metadata) {
+        // 3. Check for existing active session for this client_id and replace it IMMEDIATELY
+        {
+            let mut lock = active_sessions.lock().await;
+            if let Some(old_vdev) = lock.remove(&payload.client_id) {
+                info!(client_id = %payload.client_id, "Replacing existing active session for client ID");
+                drop(old_vdev);
+            }
+        }
+
+        // 4. Create new Virtual Device for approved client
+        let new_vdev = match VirtualOutput::new(&payload.metadata) {
             Ok(dev) => {
                 let ack = Message::HandshakeAck {
                     status: AckStatus::Approved,
@@ -478,30 +494,50 @@ impl JoycastServer {
             }
         };
 
-        // 4. Main event loop
-        loop {
-            let msg = match Self::read_frame(&mut recv).await {
-                Ok(m) => m,
-                Err(_e) => break,
-            };
+        // Insert into active_sessions map
+        let client_id = payload.client_id.clone();
+        active_sessions
+            .lock()
+            .await
+            .insert(client_id.clone(), new_vdev);
 
-            match msg {
-                Message::Events(events) => {
-                    virtual_device
-                        .emit(&events)
-                        .context("Failed to emit events to virtual device")?;
+        // 5. Main event loop
+        let loop_result = async {
+            loop {
+                let msg = match Self::read_frame(&mut recv).await {
+                    Ok(m) => m,
+                    Err(_e) => break,
+                };
+
+                match msg {
+                    Message::Events(events) => {
+                        let mut lock = active_sessions.lock().await;
+                        if let Some(vdev) = lock.get_mut(&client_id) {
+                            vdev.emit(&events)
+                                .context("Failed to emit events to virtual device")?;
+                        } else {
+                            break;
+                        }
+                    }
+                    Message::Ping => {
+                        Self::write_frame(&mut send, &Message::Pong).await?;
+                    }
+                    _ => {}
                 }
-                Message::Ping => {
-                    Self::write_frame(&mut send, &Message::Pong).await?;
-                }
-                _ => {}
+            }
+            Ok::<(), anyhow::Error>(())
+        }
+        .await;
+
+        // Clean up active session on disconnect
+        {
+            let mut lock = active_sessions.lock().await;
+            if let Some(vdev) = lock.remove(&client_id) {
+                drop(vdev);
             }
         }
 
-        // Drop virtual device explicitly upon client disconnect
-        drop(virtual_device);
-
-        Ok(())
+        loop_result
     }
 
     pub async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Message> {
