@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.4] - 2026-07-27
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Persist and reuse existing virtual uinput device across client reconnections
+
 ## [0.4.3] - 2026-07-27
 
 ### <!-- 1 -->🐛 Bug Fixes

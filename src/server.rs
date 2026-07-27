@@ -39,11 +39,16 @@ impl Default for ServerConfig {
     }
 }
 
+struct SessionEntry {
+    vdev: VirtualOutput,
+    last_active: Instant,
+}
+
 pub struct JoycastServer {
     udp_socket: Option<Arc<UdpSocket>>,
     iroh_endpoint: Option<Endpoint>,
     trust_manager: TrustManager,
-    active_sessions: Arc<Mutex<HashMap<String, VirtualOutput>>>,
+    active_sessions: Arc<Mutex<HashMap<String, SessionEntry>>>,
 }
 
 impl JoycastServer {
@@ -207,11 +212,29 @@ impl JoycastServer {
         let tm = self.trust_manager.clone();
         let active_sessions = Arc::clone(&self.active_sessions);
 
+        // Periodically reap sessions inactive for > 15 minutes
+        let sessions_reaper = Arc::clone(&active_sessions);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(60)).await;
+                let mut lock = sessions_reaper.lock().await;
+                let now = Instant::now();
+                lock.retain(|client_id, session| {
+                    let active = now.duration_since(session.last_active) < Duration::from_secs(900);
+                    if !active {
+                        info!(client_id = %client_id, "Session inactive timeout (>15m), removing virtual uinput device");
+                    }
+                    active
+                });
+            }
+        });
+
         // 1. Direct UDP Listener
         if let Some(socket) = self.udp_socket {
             let tm_clone = tm.clone();
+            let sessions_clone = Arc::clone(&active_sessions);
             handles.push(tokio::spawn(async move {
-                if let Err(e) = Self::run_udp_server(socket, tm_clone).await {
+                if let Err(e) = Self::run_udp_server(socket, tm_clone, sessions_clone).await {
                     error!("Direct UDP server loop error: {}", e);
                 }
             }));
@@ -241,32 +264,12 @@ impl JoycastServer {
     }
 
     /// Direct UDP packet handler loop.
-    async fn run_udp_server(socket: Arc<UdpSocket>, tm: TrustManager) -> Result<()> {
-        struct UdpClientSession {
-            client_id: String,
-            vdev: VirtualOutput,
-            last_seen: Instant,
-        }
-
-        let clients: Arc<Mutex<HashMap<SocketAddr, UdpClientSession>>> =
-            Arc::new(Mutex::new(HashMap::new()));
+    async fn run_udp_server(
+        socket: Arc<UdpSocket>,
+        tm: TrustManager,
+        active_sessions: Arc<Mutex<HashMap<String, SessionEntry>>>,
+    ) -> Result<()> {
         let mut buf = vec![0u8; 65535];
-
-        let clients_reaper = Arc::clone(&clients);
-        tokio::spawn(async move {
-            loop {
-                tokio::time::sleep(Duration::from_secs(5)).await;
-                let mut lock = clients_reaper.lock().await;
-                let now = Instant::now();
-                lock.retain(|addr, session| {
-                    let active = now.duration_since(session.last_seen) < Duration::from_secs(10);
-                    if !active {
-                        info!(client_addr = %addr, client_id = %session.client_id, "UDP client inactive timeout, removing virtual device");
-                    }
-                    active
-                });
-            }
-        });
 
         loop {
             let (len, src_addr) = match socket.recv_from(&mut buf).await {
@@ -286,7 +289,6 @@ impl JoycastServer {
                 }
             };
 
-            let clients_clone = Arc::clone(&clients);
             let socket_clone = Arc::clone(&socket);
 
             match msg {
@@ -300,35 +302,41 @@ impl JoycastServer {
                     );
 
                     if tm.is_approved(&payload.client_id) {
-                        match VirtualOutput::new(&payload.metadata) {
-                            Ok(vdev) => {
-                                clients_clone.lock().await.insert(
-                                    src_addr,
-                                    UdpClientSession {
-                                        client_id: payload.client_id,
-                                        vdev,
-                                        last_seen: Instant::now(),
-                                    },
-                                );
-                                let ack = Message::HandshakeAck {
-                                    status: AckStatus::Approved,
-                                    server_hostname: Self::server_hostname(),
-                                    message: "Connection authorized".into(),
-                                };
-                                if let Ok(ack_bytes) = ack.encode() {
-                                    let _ = socket_clone.send_to(&ack_bytes, src_addr).await;
+                        let mut lock = active_sessions.lock().await;
+                        if !lock.contains_key(&payload.client_id) {
+                            match VirtualOutput::new(&payload.metadata) {
+                                Ok(vdev) => {
+                                    lock.insert(
+                                        payload.client_id.clone(),
+                                        SessionEntry {
+                                            vdev,
+                                            last_active: Instant::now(),
+                                        },
+                                    );
+                                }
+                                Err(e) => {
+                                    let ack = Message::HandshakeAck {
+                                        status: AckStatus::Rejected,
+                                        server_hostname: Self::server_hostname(),
+                                        message: format!("Failed to create virtual device: {}", e),
+                                    };
+                                    if let Ok(ack_bytes) = ack.encode() {
+                                        let _ = socket_clone.send_to(&ack_bytes, src_addr).await;
+                                    }
+                                    continue;
                                 }
                             }
-                            Err(e) => {
-                                let ack = Message::HandshakeAck {
-                                    status: AckStatus::Rejected,
-                                    server_hostname: Self::server_hostname(),
-                                    message: format!("Failed to create virtual device: {}", e),
-                                };
-                                if let Ok(ack_bytes) = ack.encode() {
-                                    let _ = socket_clone.send_to(&ack_bytes, src_addr).await;
-                                }
-                            }
+                        } else {
+                            info!(client_id = %payload.client_id, "Reusing existing virtual device for Direct UDP client");
+                        }
+
+                        let ack = Message::HandshakeAck {
+                            status: AckStatus::Approved,
+                            server_hostname: Self::server_hostname(),
+                            message: "Connection authorized".into(),
+                        };
+                        if let Ok(ack_bytes) = ack.encode() {
+                            let _ = socket_clone.send_to(&ack_bytes, src_addr).await;
                         }
                     } else {
                         info!(client_id = %payload.client_id, "Client connection requires approval");
@@ -352,16 +360,10 @@ impl JoycastServer {
                     }
                 }
                 Message::Events(events) => {
-                    let mut lock = clients_clone.lock().await;
-                    if let Some(session) = lock.get_mut(&src_addr) {
-                        if !tm.is_approved(&session.client_id) {
-                            warn!(client_addr = %src_addr, "Ignoring events from non-approved client");
-                            continue;
-                        }
-                        session.last_seen = Instant::now();
-                        if let Err(e) = session.vdev.emit(&events) {
-                            warn!(client_addr = %src_addr, error = %e, "Failed to emit UDP events to virtual device");
-                        }
+                    let mut lock = active_sessions.lock().await;
+                    for session in lock.values_mut() {
+                        session.last_active = Instant::now();
+                        let _ = session.vdev.emit(&events);
                     }
                 }
                 Message::Ping => {
@@ -378,7 +380,7 @@ impl JoycastServer {
     async fn run_iroh_server(
         endpoint: Endpoint,
         tm: TrustManager,
-        active_sessions: Arc<Mutex<HashMap<String, VirtualOutput>>>,
+        active_sessions: Arc<Mutex<HashMap<String, SessionEntry>>>,
     ) -> Result<()> {
         while let Some(incoming) = endpoint.accept().await {
             let tm_clone = tm.clone();
@@ -417,7 +419,7 @@ impl JoycastServer {
     async fn handle_iroh_client(
         conn: iroh::endpoint::Connection,
         tm: TrustManager,
-        active_sessions: Arc<Mutex<HashMap<String, VirtualOutput>>>,
+        active_sessions: Arc<Mutex<HashMap<String, SessionEntry>>>,
     ) -> Result<()> {
         let (mut send, mut recv) = conn
             .accept_bi()
@@ -461,83 +463,83 @@ impl JoycastServer {
             return Ok(());
         }
 
-        // 3. Check for existing active session for this client_id and replace it IMMEDIATELY
+        // 3. Reuse existing Virtual Device if present, or create a new one
+        let client_id = payload.client_id.clone();
         {
             let mut lock = active_sessions.lock().await;
-            if let Some(old_vdev) = lock.remove(&payload.client_id) {
-                info!(client_id = %payload.client_id, "Replacing existing active session for client ID");
-                drop(old_vdev);
-            }
-        }
-
-        // 4. Create new Virtual Device for approved client
-        let new_vdev = match VirtualOutput::new(&payload.metadata) {
-            Ok(dev) => {
+            if lock.contains_key(&client_id) {
+                info!(
+                    client_id = %client_id,
+                    "Reusing existing virtual device for reconnecting client (device node remains attached to system)"
+                );
+                if let Some(entry) = lock.get_mut(&client_id) {
+                    entry.last_active = Instant::now();
+                }
                 let ack = Message::HandshakeAck {
                     status: AckStatus::Approved,
                     server_hostname: Self::server_hostname(),
-                    message: "Connection authorized".to_string(),
+                    message: "Connection authorized (reused existing virtual device)".to_string(),
                 };
                 Self::write_frame(&mut send, &ack).await?;
-                dev
-            }
-            Err(e) => {
-                let ack = Message::HandshakeAck {
-                    status: AckStatus::Rejected,
-                    server_hostname: Self::server_hostname(),
-                    message: format!("Failed to create virtual device: {}", e),
-                };
-                let _ = Self::write_frame(&mut send, &ack).await;
-                let _ = send.finish();
-                tokio::time::sleep(Duration::from_millis(500)).await;
-                return Err(e);
-            }
-        };
-
-        // Insert into active_sessions map
-        let client_id = payload.client_id.clone();
-        active_sessions
-            .lock()
-            .await
-            .insert(client_id.clone(), new_vdev);
-
-        // 5. Main event loop
-        let loop_result = async {
-            loop {
-                let msg = match Self::read_frame(&mut recv).await {
-                    Ok(m) => m,
-                    Err(_e) => break,
-                };
-
-                match msg {
-                    Message::Events(events) => {
-                        let mut lock = active_sessions.lock().await;
-                        if let Some(vdev) = lock.get_mut(&client_id) {
-                            vdev.emit(&events)
-                                .context("Failed to emit events to virtual device")?;
-                        } else {
-                            break;
-                        }
+            } else {
+                match VirtualOutput::new(&payload.metadata) {
+                    Ok(vdev) => {
+                        lock.insert(
+                            client_id.clone(),
+                            SessionEntry {
+                                vdev,
+                                last_active: Instant::now(),
+                            },
+                        );
+                        let ack = Message::HandshakeAck {
+                            status: AckStatus::Approved,
+                            server_hostname: Self::server_hostname(),
+                            message: "Connection authorized".to_string(),
+                        };
+                        Self::write_frame(&mut send, &ack).await?;
                     }
-                    Message::Ping => {
-                        Self::write_frame(&mut send, &Message::Pong).await?;
+                    Err(e) => {
+                        let ack = Message::HandshakeAck {
+                            status: AckStatus::Rejected,
+                            server_hostname: Self::server_hostname(),
+                            message: format!("Failed to create virtual device: {}", e),
+                        };
+                        let _ = Self::write_frame(&mut send, &ack).await;
+                        let _ = send.finish();
+                        tokio::time::sleep(Duration::from_millis(500)).await;
+                        return Err(e);
                     }
-                    _ => {}
                 }
             }
-            Ok::<(), anyhow::Error>(())
         }
-        .await;
 
-        // Clean up active session on disconnect
-        {
-            let mut lock = active_sessions.lock().await;
-            if let Some(vdev) = lock.remove(&client_id) {
-                drop(vdev);
+        // 4. Main event loop
+        loop {
+            let msg = match Self::read_frame(&mut recv).await {
+                Ok(m) => m,
+                Err(_e) => break,
+            };
+
+            match msg {
+                Message::Events(events) => {
+                    let mut lock = active_sessions.lock().await;
+                    if let Some(entry) = lock.get_mut(&client_id) {
+                        entry.last_active = Instant::now();
+                        let _ = entry.vdev.emit(&events);
+                    } else {
+                        break;
+                    }
+                }
+                Message::Ping => {
+                    Self::write_frame(&mut send, &Message::Pong).await?;
+                }
+                _ => {}
             }
         }
 
-        loop_result
+        // Keep virtual device attached across reconnects!
+        info!(client_id = %client_id, "Iroh client disconnected, keeping virtual device attached for reconnection");
+        Ok(())
     }
 
     pub async fn read_frame<R: AsyncReadExt + Unpin>(reader: &mut R) -> Result<Message> {
