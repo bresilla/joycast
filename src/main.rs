@@ -5,6 +5,7 @@ use joycast::{
     device::DeviceScanner,
     history::HistoryStore,
     server::{JoycastServer, ServerConfig},
+    service::ServiceManager,
     trust::TrustManager,
 };
 use std::net::SocketAddr;
@@ -90,6 +91,15 @@ enum Commands {
         #[arg(short, long)]
         all: bool,
     },
+    /// Manage the Joycast systemd background service (install, start, stop, status, logs)
+    Service {
+        #[command(subcommand)]
+        subcommand: ServiceSubcommand,
+
+        /// Install or manage as a user-level systemd service (~/.config/systemd/user/)
+        #[arg(long)]
+        user: bool,
+    },
 }
 
 #[derive(Subcommand, Debug)]
@@ -110,6 +120,28 @@ enum ServerSubcommand {
         /// Client ID or prefix to revoke
         client_id: String,
     },
+}
+
+#[derive(Subcommand, Debug)]
+enum ServiceSubcommand {
+    /// Generate and install the systemd service file
+    Install,
+    /// Stop, disable, and remove the systemd service file
+    Uninstall,
+    /// Start the systemd service
+    Start,
+    /// Stop the systemd service
+    Stop,
+    /// Restart the systemd service
+    Restart,
+    /// Check systemd service status
+    Status,
+    /// Alias for status
+    Check,
+    /// Tail live service journal logs
+    Logs,
+    /// Alias for logs
+    Run,
 }
 
 #[tokio::main]
@@ -274,6 +306,18 @@ async fn main() -> Result<()> {
                         dev.product
                     );
                 }
+            }
+        }
+        Commands::Service { subcommand, user } => {
+            let mgr = ServiceManager::new(user);
+            match subcommand {
+                ServiceSubcommand::Install => mgr.install()?,
+                ServiceSubcommand::Uninstall => mgr.uninstall()?,
+                ServiceSubcommand::Start => mgr.start()?,
+                ServiceSubcommand::Stop => mgr.stop()?,
+                ServiceSubcommand::Restart => mgr.restart()?,
+                ServiceSubcommand::Status | ServiceSubcommand::Check => mgr.status()?,
+                ServiceSubcommand::Logs | ServiceSubcommand::Run => mgr.logs()?,
             }
         }
     }

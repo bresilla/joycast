@@ -3,6 +3,7 @@ pub mod device;
 pub mod history;
 pub mod protocol;
 pub mod server;
+pub mod service;
 pub mod transport;
 pub mod trust;
 

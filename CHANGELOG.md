@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.0] - 2026-07-27
+
+### <!-- 0 -->⛰️  Features
+
+- Add joycast service subcommand for systemd management
+
 ## [0.3.2] - 2026-07-27
 
 ### <!-- 0 -->⛰️  Features
