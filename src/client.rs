@@ -20,6 +20,9 @@ use crate::transport::TargetAddress;
 pub struct ClientConfig {
     pub target: Option<String>,
     pub device_path: Option<PathBuf>,
+    pub keyboard: bool,
+    pub mouse: bool,
+    pub all: bool,
     pub history_file: Option<PathBuf>,
     pub client_id_file: Option<PathBuf>,
 }
@@ -122,17 +125,51 @@ impl JoycastClient {
         let device_path = match config.device_path {
             Some(path) => path,
             None => {
-                info!("No device specified, searching for gamepad/joystick...");
-                match DeviceScanner::find_first_gamepad() {
-                    Some(path) => {
-                        info!("Auto-detected input device: {}", path.display());
-                        path
-                    }
-                    None => {
-                        bail!(
-                            "No gamepad or joystick found. Use `joycast list` to see available devices and specify one with --device <PATH>"
+                let devices =
+                    DeviceScanner::list_devices_filtered(config.keyboard, config.mouse, config.all);
+                if devices.is_empty() {
+                    bail!(
+                        "No matching gamepad or joystick found. Pass '--keyboard' (-k), '--mouse' (-m), or '--all' (-a) to include other device types, or specify '--device <PATH>'."
+                    );
+                } else if devices.len() == 1 {
+                    let path = devices[0].path.clone();
+                    info!(
+                        "Auto-detected input device: {} ({})",
+                        path.display(),
+                        devices[0].name
+                    );
+                    path
+                } else {
+                    println!("\nSelect input device to stream:");
+                    for (idx, dev) in devices.iter().enumerate() {
+                        println!(
+                            "  [{}] Path: {}\n      Name: {}\n      Type: {}\n",
+                            idx + 1,
+                            dev.path.display(),
+                            dev.name,
+                            dev.device_type
                         );
                     }
+                    print!("Enter selection [1-{}]: ", devices.len());
+                    use std::io::Write;
+                    std::io::stdout().flush().ok();
+
+                    let mut input = String::new();
+                    std::io::stdin()
+                        .read_line(&mut input)
+                        .context("Failed to read device selection")?;
+
+                    let choice: usize = input.trim().parse().context("Invalid selection index")?;
+                    if choice == 0 || choice > devices.len() {
+                        bail!("Selection index out of bounds");
+                    }
+                    let selected_path = devices[choice - 1].path.clone();
+                    info!(
+                        "Selected input device: {} ({})",
+                        selected_path.display(),
+                        devices[choice - 1].name
+                    );
+                    selected_path
                 }
             }
         };
