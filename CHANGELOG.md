@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.2] - 2026-07-27
+
+### <!-- 0 -->⛰️  Features
+
+- Default joycast client device resolution to gamepads only and support --keyboard, --mouse, --all flags
+
 ## [0.3.1] - 2026-07-27
 
 ### <!-- 0 -->⛰️  Features
