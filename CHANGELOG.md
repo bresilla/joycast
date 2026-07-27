@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.5] - 2026-07-27
+
+### <!-- 7 -->⚙️ Miscellaneous Tasks
+
+- Switch release workflow to build static musl binaries for amd64 and arm64
+
 ## [0.4.4] - 2026-07-27
 
 ### <!-- 1 -->🐛 Bug Fixes
