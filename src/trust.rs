@@ -51,6 +51,7 @@ impl TrustManager {
             {
                 PathBuf::from(format!("/home/{}/.config/joycast", sudo_user))
             } else if std::env::var("USER").unwrap_or_default() == "root"
+                || std::env::var("JOURNAL_STREAM").is_ok()
                 || std::env::var("SYSTEMD_EXEC_PID").is_ok()
             {
                 PathBuf::from("/etc/joycast")
@@ -82,6 +83,17 @@ impl TrustManager {
         })
     }
 
+    /// Reload disk state into memory so external CLI processes (`joycast server approve`) are reflected immediately in the running daemon.
+    fn reload(&self) {
+        if self.store_path.exists()
+            && let Ok(content) = fs::read_to_string(&self.store_path)
+            && let Ok(disk_data) = serde_json::from_str::<TrustData>(&content)
+        {
+            let mut lock = self.data.lock().unwrap();
+            *lock = disk_data;
+        }
+    }
+
     /// Save state to disk.
     fn save(&self, data: &TrustData) -> Result<()> {
         if let Some(parent) = self.store_path.parent() {
@@ -97,8 +109,9 @@ impl TrustManager {
         Ok(())
     }
 
-    /// Check if a client ID is approved.
+    /// Check if a client ID is approved (reloads from disk first).
     pub fn is_approved(&self, client_id: &str) -> bool {
+        self.reload();
         let lock = self.data.lock().unwrap();
         lock.approved.contains_key(client_id)
     }
@@ -111,6 +124,7 @@ impl TrustManager {
         device_name: String,
         transport: String,
     ) {
+        self.reload();
         let mut lock = self.data.lock().unwrap();
         if lock.approved.contains_key(&client_id) {
             return;
@@ -131,6 +145,7 @@ impl TrustManager {
 
     /// Approve a pending client by client_id or prefix.
     pub fn approve(&self, target_id: &str) -> Result<ApprovedClientInfo> {
+        self.reload();
         let mut lock = self.data.lock().unwrap();
 
         // Match exact or prefix
@@ -171,6 +186,7 @@ impl TrustManager {
 
     /// Revoke / un-trust an approved client.
     pub fn revoke(&self, target_id: &str) -> Result<bool> {
+        self.reload();
         let mut lock = self.data.lock().unwrap();
 
         let matched_id = if lock.approved.contains_key(target_id) {
@@ -197,6 +213,7 @@ impl TrustManager {
 
     /// List all clients waiting for authorization.
     pub fn list_pending(&self) -> Vec<PendingClientInfo> {
+        self.reload();
         let lock = self.data.lock().unwrap();
         let mut list: Vec<PendingClientInfo> = lock.pending.values().cloned().collect();
         list.sort_by(|a, b| a.first_seen.cmp(&b.first_seen));
@@ -205,6 +222,7 @@ impl TrustManager {
 
     /// List all approved clients.
     pub fn list_approved(&self) -> Vec<ApprovedClientInfo> {
+        self.reload();
         let lock = self.data.lock().unwrap();
         let mut list: Vec<ApprovedClientInfo> = lock.approved.values().cloned().collect();
         list.sort_by(|a, b| a.approved_at.cmp(&b.approved_at));
