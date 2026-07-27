@@ -14,9 +14,9 @@ Inspired by [warpout](https://github.com/bresilla/warpout), `joycast` captures p
 - **Client Authorization & Security**:
   - First-time connections are untrusted by default to prevent unauthorized access.
   - Server maintains a pending list and requires explicit authorization via `joycast server approve <CLIENT_ID>`.
-- **Client Connection History & Auto-Selection**:
-  - Remembers previously authorized servers (storing server hostname, address, and transport).
-  - Running `joycast client` without arguments displays an interactive menu of saved servers.
+- **Client's Local Connection History**:
+  - The client locally remembers servers it has successfully connected to (storing server hostname, target address, and transport).
+  - Running `joycast client` without arguments displays an interactive menu of previously saved servers on the client.
 - **Dynamic Device Mirroring**:
   - Reads client input capabilities (buttons, axes, fuzz, flat, resolution, vendor/product IDs).
   - Synthesizes an identical virtual `uinput` device on the server.
@@ -132,8 +132,8 @@ joycast client 0a2c73... --device /dev/input/event3
 joycast client 192.168.1.50:12398 --device /dev/input/event3
 ```
 
-#### Connect from Saved History (Interactive Menu):
-If no target argument is specified, `joycast client` shows a menu of previously authorized servers:
+#### Connect from Client's Local Saved History (Interactive Menu):
+If no target argument is specified, `joycast client` shows an interactive menu of servers previously saved on the client machine:
 
 ```bash
 joycast client
@@ -150,7 +150,7 @@ Select a previously connected server:
 Enter selection [1-1]: 1
 ```
 
-#### View Connection History:
+#### View Client's Local Connection History:
 ```bash
 joycast client --history
 ```
@@ -211,7 +211,7 @@ async fn main() -> Result<()> {
 
 ### 2. Client-Side Library Example
 
-Connect a client to a server using custom configuration directories for server history and client identity:
+Connect a client to a server using custom configuration directories for the client's local server history and client identity:
 
 ```rust
 use anyhow::Result;
@@ -227,7 +227,7 @@ async fn main() -> Result<()> {
         target: Some("192.168.1.50:12398".to_string()),
         // Path to physical input device (None for auto-detecting first gamepad)
         device_path: Some(PathBuf::from("/dev/input/event3")),
-        // Custom path to store server history
+        // Custom path to store client's local server history
         history_file: Some(custom_data_dir.join("known_servers.json")),
         // Custom path to store persistent client identity ID
         client_id_file: Some(custom_data_dir.join("client_id")),
@@ -243,7 +243,7 @@ async fn main() -> Result<()> {
 
 ### 3. Programmatic Device Scanning & Security Management
 
-Query input devices, inspect pending client connection requests, and manage authorization programmatically:
+Query input devices, inspect pending client connection requests on the server, and query the client's local connection history:
 
 ```rust
 use anyhow::Result;
@@ -258,7 +258,7 @@ fn main() -> Result<()> {
         println!("Found input device: {} at {}", dev.name, dev.path.display());
     }
 
-    // Inspect pending connection requests on server
+    // Inspect pending connection requests on the server
     let trust = TrustManager::new(None)?;
     for pending in trust.list_pending() {
         println!("Pending client: {} ({})", pending.client_id, pending.hostname);
@@ -266,10 +266,10 @@ fn main() -> Result<()> {
         // trust.approve(&pending.client_id)?;
     }
 
-    // Inspect server history on client
+    // Inspect the client's local connection history (saved on client disk)
     let history = HistoryStore::new()?;
     for server in history.list_servers() {
-        println!("Known server: {} ({})", server.server_hostname, server.target);
+        println!("Previously connected server: {} ({})", server.server_hostname, server.target);
     }
 
     Ok(())
