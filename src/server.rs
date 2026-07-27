@@ -74,20 +74,20 @@ impl JoycastServer {
             return Self::parse_secret_key_hex(&content);
         }
 
-        // 3. System-wide & Sudo fallback locations:
+        // 3. Candidate search order
         let mut candidates = Vec::new();
+        let etc_path = PathBuf::from("/etc/joycast/server.key");
+        candidates.push(etc_path.clone());
 
         if let Ok(sudo_user) = std::env::var("SUDO_USER")
             && !sudo_user.is_empty()
             && sudo_user != "root"
         {
-            let sudo_path =
-                PathBuf::from(format!("/home/{}/.config/joycast/server.key", sudo_user));
-            candidates.push(sudo_path);
+            candidates.push(PathBuf::from(format!(
+                "/home/{}/.config/joycast/server.key",
+                sudo_user
+            )));
         }
-
-        let etc_path = PathBuf::from("/etc/joycast/server.key");
-        candidates.push(etc_path);
 
         if let Some(user_config) = dirs_next::config_dir() {
             candidates.push(user_config.join("joycast").join("server.key"));
@@ -104,17 +104,9 @@ impl JoycastServer {
             }
         }
 
-        // If no existing key file found, pick target write path based on context:
-        let target_path = if let Ok(sudo_user) = std::env::var("SUDO_USER")
-            && !sudo_user.is_empty()
-            && sudo_user != "root"
-        {
-            PathBuf::from(format!("/home/{}/.config/joycast/server.key", sudo_user))
-        } else if std::env::var("USER").unwrap_or_default() == "root"
-            || std::env::var("JOURNAL_STREAM").is_ok()
-            || std::env::var("SYSTEMD_EXEC_PID").is_ok()
-        {
-            PathBuf::from("/etc/joycast/server.key")
+        // Target write path when generating a new key
+        let target_path = if etc_path.exists() || TrustManager::is_root_context() {
+            etc_path
         } else if let Some(user_config) = dirs_next::config_dir() {
             user_config.join("joycast").join("server.key")
         } else {

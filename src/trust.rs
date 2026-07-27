@@ -40,19 +40,21 @@ pub struct TrustManager {
 }
 
 impl TrustManager {
+    /// Helper to detect if running as root, under sudo, or as a systemd service.
+    pub fn is_root_context() -> bool {
+        std::env::var("USER").unwrap_or_default() == "root"
+            || std::env::var("SUDO_USER").is_ok()
+            || std::env::var("JOURNAL_STREAM").is_ok()
+            || std::env::var("SYSTEMD_EXEC_PID").is_ok()
+    }
+
     /// Load or create the TrustManager storing trusted clients at `store_path`.
     pub fn new(store_path: Option<PathBuf>) -> Result<Self> {
         let path = if let Some(p) = store_path {
             p
         } else {
-            let base_dir = if let Ok(sudo_user) = std::env::var("SUDO_USER")
-                && !sudo_user.is_empty()
-                && sudo_user != "root"
-            {
-                PathBuf::from(format!("/home/{}/.config/joycast", sudo_user))
-            } else if std::env::var("USER").unwrap_or_default() == "root"
-                || std::env::var("JOURNAL_STREAM").is_ok()
-                || std::env::var("SYSTEMD_EXEC_PID").is_ok()
+            let base_dir = if PathBuf::from("/etc/joycast/trusted_clients.json").exists()
+                || Self::is_root_context()
             {
                 PathBuf::from("/etc/joycast")
             } else if let Some(cfg) = dirs_next::config_dir() {
