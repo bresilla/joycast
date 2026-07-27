@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.4.1] - 2026-07-27
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Ensure root and sudo CLI commands resolve /etc/joycast identically to systemd daemon
+
 ## [0.4.0] - 2026-07-27
 
 ### <!-- 0 -->⛰️  Features
