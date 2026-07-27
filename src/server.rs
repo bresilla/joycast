@@ -42,6 +42,7 @@ impl Default for ServerConfig {
 struct SessionEntry {
     vdev: VirtualOutput,
     last_active: Instant,
+    client_hostname: String,
 }
 
 pub struct JoycastServer {
@@ -219,10 +220,10 @@ impl JoycastServer {
                 tokio::time::sleep(Duration::from_secs(60)).await;
                 let mut lock = sessions_reaper.lock().await;
                 let now = Instant::now();
-                lock.retain(|client_id, session| {
+                lock.retain(|session_key, session| {
                     let active = now.duration_since(session.last_active) < Duration::from_secs(900);
                     if !active {
-                        info!(client_id = %client_id, "Session inactive timeout (>15m), removing virtual uinput device");
+                        info!(session_key = %session_key, "Session inactive timeout (>15m), removing virtual uinput device");
                     }
                     active
                 });
@@ -302,15 +303,40 @@ impl JoycastServer {
                     );
 
                     if tm.is_approved(&payload.client_id) {
+                        let dev_id_str = payload
+                            .device_id
+                            .as_deref()
+                            .unwrap_or(&payload.metadata.name);
+                        let session_key = format!("{}:{}", payload.client_id, dev_id_str);
+
                         let mut lock = active_sessions.lock().await;
-                        if !lock.contains_key(&payload.client_id) {
-                            match VirtualOutput::new(&payload.metadata) {
+                        if !lock.contains_key(&session_key) {
+                            let count = lock
+                                .values()
+                                .filter(|s| s.client_hostname == payload.client_hostname)
+                                .count();
+                            let dev_name = if count == 0 {
+                                format!(
+                                    "{}: {} (Joycast)",
+                                    payload.client_hostname, payload.metadata.name
+                                )
+                            } else {
+                                format!(
+                                    "{} #{}: {} (Joycast)",
+                                    payload.client_hostname,
+                                    count + 1,
+                                    payload.metadata.name
+                                )
+                            };
+
+                            match VirtualOutput::new_with_name(&payload.metadata, &dev_name) {
                                 Ok(vdev) => {
                                     lock.insert(
-                                        payload.client_id.clone(),
+                                        session_key,
                                         SessionEntry {
                                             vdev,
                                             last_active: Instant::now(),
+                                            client_hostname: payload.client_hostname.clone(),
                                         },
                                     );
                                 }
@@ -463,16 +489,21 @@ impl JoycastServer {
             return Ok(());
         }
 
-        // 3. Reuse existing Virtual Device if present, or create a new one
-        let client_id = payload.client_id.clone();
+        // 3. Reuse existing Virtual Device if present, or create a new one with Option 3 formatting
+        let dev_id_str = payload
+            .device_id
+            .as_deref()
+            .unwrap_or(&payload.metadata.name);
+        let session_key = format!("{}:{}", payload.client_id, dev_id_str);
+
         {
             let mut lock = active_sessions.lock().await;
-            if lock.contains_key(&client_id) {
+            if lock.contains_key(&session_key) {
                 info!(
-                    client_id = %client_id,
+                    session_key = %session_key,
                     "Reusing existing virtual device for reconnecting client (device node remains attached to system)"
                 );
-                if let Some(entry) = lock.get_mut(&client_id) {
+                if let Some(entry) = lock.get_mut(&session_key) {
                     entry.last_active = Instant::now();
                 }
                 let ack = Message::HandshakeAck {
@@ -482,13 +513,32 @@ impl JoycastServer {
                 };
                 Self::write_frame(&mut send, &ack).await?;
             } else {
-                match VirtualOutput::new(&payload.metadata) {
+                let count = lock
+                    .values()
+                    .filter(|s| s.client_hostname == payload.client_hostname)
+                    .count();
+                let dev_name = if count == 0 {
+                    format!(
+                        "{}: {} (Joycast)",
+                        payload.client_hostname, payload.metadata.name
+                    )
+                } else {
+                    format!(
+                        "{} #{}: {} (Joycast)",
+                        payload.client_hostname,
+                        count + 1,
+                        payload.metadata.name
+                    )
+                };
+
+                match VirtualOutput::new_with_name(&payload.metadata, &dev_name) {
                     Ok(vdev) => {
                         lock.insert(
-                            client_id.clone(),
+                            session_key.clone(),
                             SessionEntry {
                                 vdev,
                                 last_active: Instant::now(),
+                                client_hostname: payload.client_hostname.clone(),
                             },
                         );
                         let ack = Message::HandshakeAck {
@@ -523,7 +573,7 @@ impl JoycastServer {
             match msg {
                 Message::Events(events) => {
                     let mut lock = active_sessions.lock().await;
-                    if let Some(entry) = lock.get_mut(&client_id) {
+                    if let Some(entry) = lock.get_mut(&session_key) {
                         entry.last_active = Instant::now();
                         let _ = entry.vdev.emit(&events);
                     } else {
@@ -538,7 +588,7 @@ impl JoycastServer {
         }
 
         // Keep virtual device attached across reconnects!
-        info!(client_id = %client_id, "Iroh client disconnected, keeping virtual device attached for reconnection");
+        info!(session_key = %session_key, "Iroh client disconnected, keeping virtual device attached for reconnection");
         Ok(())
     }
 

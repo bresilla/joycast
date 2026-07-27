@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.5.0] - 2026-07-27
+
+### <!-- 0 -->⛰️  Features
+
+- Implement Option 3 device naming and per-device session keying for multi-controller & multi-host support
+
 ## [0.4.7] - 2026-07-27
 
 ### <!-- 1 -->🐛 Bug Fixes
