@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.2.4] - 2026-07-27
+
+### <!-- 1 -->🐛 Bug Fixes
+
+- Clean up virtual uinput device on client disconnect and reaper inactive UDP sessions
+
 ## [0.2.1] - 2026-07-27
 
 ### <!-- 1 -->🐛 Bug Fixes

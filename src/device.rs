@@ -172,6 +172,7 @@ pub fn extract_metadata(device: &Device) -> DeviceMetadata {
 
 /// Virtual uinput device created on the server to replay events.
 pub struct VirtualOutput {
+    name: String,
     device: VirtualDevice,
 }
 
@@ -232,13 +233,16 @@ impl VirtualOutput {
             "Failed to build virtual uinput device (check uinput permissions or run with sudo)",
         )?;
         info!(
-            name = %meta.name,
+            name = %dev_name,
             keys_count = meta.keys.len(),
             abs_count = meta.abs_axes.len(),
             "Virtual uinput device created successfully"
         );
 
-        Ok(Self { device })
+        Ok(Self {
+            name: dev_name,
+            device,
+        })
     }
 
     /// Emit a batch of wire events onto the uinput device.
@@ -254,5 +258,11 @@ impl VirtualOutput {
                 .context("Failed to emit events to virtual uinput device")?;
         }
         Ok(())
+    }
+}
+
+impl Drop for VirtualOutput {
+    fn drop(&mut self) {
+        info!(name = %self.name, "Virtual uinput device destroyed and unregistered from system");
     }
 }
