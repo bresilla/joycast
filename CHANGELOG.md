@@ -1,5 +1,11 @@
 # Changelog
 
+## [0.3.1] - 2026-07-27
+
+### <!-- 0 -->⛰️  Features
+
+- Default joycast list to gamepads only and put keyboard/mouse behind flags
+
 ## [0.3.0] - 2026-07-27
 
 ### <!-- 0 -->⛰️  Features
