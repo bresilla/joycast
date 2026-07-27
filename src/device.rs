@@ -65,16 +65,28 @@ impl DeviceScanner {
             || n.contains("wireless controller touchpad")
     }
 
-    /// Enumerate `/dev/input/event*` devices with noise filtering.
-    pub fn list_devices_filtered(include_all: bool) -> Vec<DeviceInfo> {
+    /// Enumerate `/dev/input/event*` devices with specific type selection filters.
+    pub fn list_devices_filtered(
+        include_keyboard: bool,
+        include_mouse: bool,
+        include_all: bool,
+    ) -> Vec<DeviceInfo> {
         let mut devices = Vec::new();
         for (path, device) in evdev::enumerate() {
             let name = device.name().unwrap_or("Unknown Device").to_string();
             let input_id = device.input_id();
             let device_type = Self::classify_device(&device);
 
-            if !include_all && (device_type == DeviceType::Other || Self::is_noise_device(&name)) {
-                continue;
+            if !include_all {
+                if device_type == DeviceType::Other || Self::is_noise_device(&name) {
+                    continue;
+                }
+                match device_type {
+                    DeviceType::Gamepad | DeviceType::Joystick => {}
+                    DeviceType::Keyboard if include_keyboard => {}
+                    DeviceType::Mouse if include_mouse => {}
+                    _ => continue,
+                }
             }
 
             devices.push(DeviceInfo {
@@ -89,9 +101,9 @@ impl DeviceScanner {
         devices
     }
 
-    /// Enumerate clean interactive input devices (Gamepads, Joysticks, Keyboards, Mice).
+    /// Enumerate gamepads and joysticks by default.
     pub fn list_devices() -> Vec<DeviceInfo> {
-        Self::list_devices_filtered(false)
+        Self::list_devices_filtered(false, false, false)
     }
 
     /// Classify device based on its supported keys and axes.
