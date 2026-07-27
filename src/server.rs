@@ -6,7 +6,7 @@ use std::fs;
 use std::net::SocketAddr;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UdpSocket;
 use tokio::sync::Mutex;
@@ -251,9 +251,32 @@ impl JoycastServer {
 
     /// Direct UDP packet handler loop.
     async fn run_udp_server(socket: Arc<UdpSocket>, tm: TrustManager) -> Result<()> {
-        let clients: Arc<Mutex<HashMap<SocketAddr, (String, VirtualOutput)>>> =
+        struct UdpClientSession {
+            client_id: String,
+            vdev: VirtualOutput,
+            last_seen: Instant,
+        }
+
+        let clients: Arc<Mutex<HashMap<SocketAddr, UdpClientSession>>> =
             Arc::new(Mutex::new(HashMap::new()));
         let mut buf = vec![0u8; 65535];
+
+        // Periodically clean up inactive UDP sessions
+        let clients_reaper = Arc::clone(&clients);
+        tokio::spawn(async move {
+            loop {
+                tokio::time::sleep(Duration::from_secs(5)).await;
+                let mut lock = clients_reaper.lock().await;
+                let now = Instant::now();
+                lock.retain(|addr, session| {
+                    let active = now.duration_since(session.last_seen) < Duration::from_secs(10);
+                    if !active {
+                        info!(client_addr = %addr, client_id = %session.client_id, "UDP client inactive timeout, removing virtual device");
+                    }
+                    active
+                });
+            }
+        });
 
         loop {
             let (len, src_addr) = match socket.recv_from(&mut buf).await {
@@ -289,10 +312,14 @@ impl JoycastServer {
                     if tm.is_approved(&payload.client_id) {
                         match VirtualOutput::new(&payload.metadata) {
                             Ok(vdev) => {
-                                clients_clone
-                                    .lock()
-                                    .await
-                                    .insert(src_addr, (payload.client_id, vdev));
+                                clients_clone.lock().await.insert(
+                                    src_addr,
+                                    UdpClientSession {
+                                        client_id: payload.client_id,
+                                        vdev,
+                                        last_seen: Instant::now(),
+                                    },
+                                );
                                 let ack = Message::HandshakeAck {
                                     status: AckStatus::Approved,
                                     server_hostname: Self::server_hostname(),
@@ -336,12 +363,13 @@ impl JoycastServer {
                 }
                 Message::Events(events) => {
                     let mut lock = clients_clone.lock().await;
-                    if let Some((client_id, vdev)) = lock.get_mut(&src_addr) {
-                        if !tm.is_approved(client_id) {
+                    if let Some(session) = lock.get_mut(&src_addr) {
+                        if !tm.is_approved(&session.client_id) {
                             warn!(client_addr = %src_addr, "Ignoring events from non-approved client");
                             continue;
                         }
-                        if let Err(e) = vdev.emit(&events) {
+                        session.last_seen = Instant::now();
+                        if let Err(e) = session.vdev.emit(&events) {
                             warn!(client_addr = %src_addr, error = %e, "Failed to emit UDP events to virtual device");
                         }
                     }
@@ -477,6 +505,9 @@ impl JoycastServer {
                 _ => {}
             }
         }
+
+        // Drop virtual device explicitly upon client disconnect
+        drop(virtual_device);
 
         Ok(())
     }
