@@ -1,5 +1,11 @@
 # Changelog
 
+## Unreleased
+
+### Features
+
+- Keep client transports and server sessions alive across controller disconnects, then automatically resume forwarding when the same controller reconnects.
+
 ## [0.5.1] - 2026-07-27
 
 ### <!-- 0 -->⛰️  Features

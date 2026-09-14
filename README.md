@@ -22,6 +22,7 @@ Inspired by [warpout](https://github.com/bresilla/warpout), `joycast` captures p
 - **Dynamic Device Mirroring**:
   - Reads client input capabilities (buttons, axes, fuzz, flat, resolution, vendor/product IDs).
   - Synthesizes an identical virtual `uinput` device on the server.
+  - Keeps the server session and virtual device alive when a controller disconnects, then automatically resumes forwarding when it reconnects (even if udev assigns a new event path).
 - **Modular Library & Single Binary**:
   - Full Rust library (`joycast`) exposing server, client, trust manager, device scanner, service manager, and history modules with configurable paths.
   - Single CLI binary (`joycast`).
@@ -169,6 +170,8 @@ joycast client 0a2c73... --device /dev/input/event3
 ```bash
 joycast client 192.168.1.50:12398 --device /dev/input/event3
 ```
+
+The client can be started while the selected controller is off or disconnected. It waits for the device while keeping the server transport alive. If the controller later disconnects, leave the client running; Joycast finds the same controller and resumes forwarding automatically when it returns.
 
 #### Connect from Client's Local Saved History (Interactive Menu):
 If no target argument is specified, `joycast client` shows an interactive menu of servers previously saved on the client machine:

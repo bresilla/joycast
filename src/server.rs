@@ -271,6 +271,7 @@ impl JoycastServer {
         active_sessions: Arc<Mutex<HashMap<String, SessionEntry>>>,
     ) -> Result<()> {
         let mut buf = vec![0u8; 65535];
+        let mut client_sessions: HashMap<SocketAddr, String> = HashMap::new();
 
         loop {
             let (len, src_addr) = match socket.recv_from(&mut buf).await {
@@ -294,6 +295,7 @@ impl JoycastServer {
 
             match msg {
                 Message::Handshake(payload) => {
+                    client_sessions.remove(&src_addr);
                     info!(
                         client_addr = %src_addr,
                         client_id = %payload.client_id,
@@ -332,7 +334,7 @@ impl JoycastServer {
                             match VirtualOutput::new_with_name(&payload.metadata, &dev_name) {
                                 Ok(vdev) => {
                                     lock.insert(
-                                        session_key,
+                                        session_key.clone(),
                                         SessionEntry {
                                             vdev,
                                             last_active: Instant::now(),
@@ -354,7 +356,12 @@ impl JoycastServer {
                             }
                         } else {
                             info!(client_id = %payload.client_id, "Reusing existing virtual device for Direct UDP client");
+                            if let Some(entry) = lock.get_mut(&session_key) {
+                                entry.last_active = Instant::now();
+                            }
                         }
+
+                        client_sessions.insert(src_addr, session_key);
 
                         let ack = Message::HandshakeAck {
                             status: AckStatus::Approved,
@@ -386,13 +393,21 @@ impl JoycastServer {
                     }
                 }
                 Message::Events(events) => {
-                    let mut lock = active_sessions.lock().await;
-                    for session in lock.values_mut() {
-                        session.last_active = Instant::now();
-                        let _ = session.vdev.emit(&events);
+                    if let Some(session_key) = client_sessions.get(&src_addr) {
+                        let mut lock = active_sessions.lock().await;
+                        if let Some(session) = lock.get_mut(session_key) {
+                            session.last_active = Instant::now();
+                            let _ = session.vdev.emit(&events);
+                        }
                     }
                 }
                 Message::Ping => {
+                    if let Some(session_key) = client_sessions.get(&src_addr) {
+                        let mut lock = active_sessions.lock().await;
+                        if let Some(session) = lock.get_mut(session_key) {
+                            session.last_active = Instant::now();
+                        }
+                    }
                     if let Ok(pong_bytes) = Message::Pong.encode() {
                         let _ = socket_clone.send_to(&pong_bytes, src_addr).await;
                     }
@@ -452,11 +467,14 @@ impl JoycastServer {
             .await
             .context("Failed to accept bi-directional stream")?;
 
-        // 1. Expect Handshake
-        let handshake_msg = Self::read_frame(&mut recv).await?;
-        let payload = match handshake_msg {
-            Message::Handshake(p) => p,
-            other => bail!("Expected Handshake message, got: {:?}", other),
+        // 1. Expect Handshake. Pings are allowed first so the client can keep the
+        // transport connected while waiting for a powered-off controller.
+        let payload = loop {
+            match Self::read_frame(&mut recv).await? {
+                Message::Handshake(payload) => break payload,
+                Message::Ping => Self::write_frame(&mut send, &Message::Pong).await?,
+                other => bail!("Expected Handshake message, got: {:?}", other),
+            }
         };
 
         info!(
@@ -581,6 +599,13 @@ impl JoycastServer {
                     }
                 }
                 Message::Ping => {
+                    let mut lock = active_sessions.lock().await;
+                    if let Some(entry) = lock.get_mut(&session_key) {
+                        entry.last_active = Instant::now();
+                    } else {
+                        break;
+                    }
+                    drop(lock);
                     Self::write_frame(&mut send, &Message::Pong).await?;
                 }
                 _ => {}
